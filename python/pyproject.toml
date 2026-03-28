@@ -1,8 +1,8 @@
 [project]
 name = "evolutionary-art-python"
 version = "0.1.0"
-description = "Add your description here"
-requires-python = ">=3.12"
+description = "Reconstructs target images with transparent geometric primitives using an attention-guided evolutionary optimizer"
+requires-python = ">=3.14"
 dependencies = [
     "matplotlib>=3.10.8",
     "numpy>=2.4.3",
