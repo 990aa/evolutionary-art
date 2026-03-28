@@ -10,6 +10,7 @@ from skimage.transform import resize
 
 from src.canvas import create_white_canvas
 from src.mse import (
+    per_pixel_error_map,
     per_pixel_perceptual_error_map,
     process_error_map,
     rgb_to_lab_image,
@@ -432,6 +433,24 @@ class HillClimbingOptimizer:
         coarse_weight, fine_weight = self._loss_weights(iteration)
         return coarse_weight * coarse_mse + fine_weight * fine_mse
 
+    def evaluate_canvas_loss(self, canvas: np.ndarray) -> float:
+        return self._evaluate_multiscale_loss(canvas, self.iteration)
+
+    def compute_error_maps_for_display(self) -> dict[str, np.ndarray]:
+        raw_rgb = per_pixel_error_map(self.canvas, self.target)
+        raw_perceptual = per_pixel_perceptual_error_map(self.canvas, self.target)
+
+        if self.structure_map is None:
+            structure_weighted = raw_perceptual
+        else:
+            structure_weighted = raw_perceptual * (1.0 + self.structure_map)
+
+        return {
+            "rgb": raw_rgb.astype(np.float32, copy=False),
+            "structure": structure_weighted.astype(np.float32, copy=False),
+            "perceptual": raw_perceptual.astype(np.float32, copy=False),
+        }
+
     def _compute_guided_error_map(
         self, canvas: np.ndarray, iteration: int
     ) -> np.ndarray:
@@ -783,6 +802,18 @@ class HillClimbingOptimizer:
                 break
             self.step()
         return self
+
+    def adopt_solution(
+        self,
+        polygons: list[Polygon],
+        canvas: np.ndarray,
+        mse_value: float,
+    ) -> None:
+        self.accepted_polygons = list(polygons)
+        self.canvas = np.array(canvas, copy=True).astype(np.float32, copy=False)
+        self.current_mse = float(mse_value)
+        self.current_error_map = self._compute_guided_error_map(self.canvas, self.iteration)
+        self.mse_history.append(self.current_mse)
 
 
 __all__ = [
