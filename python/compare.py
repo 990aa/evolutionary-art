@@ -38,7 +38,9 @@ def _prepare_image_square(
             new_h = max(1, int(round(orig_h * scale)))
             resized = rgb.resize((new_w, new_h), Image.Resampling.LANCZOS)
             canvas = Image.new("RGB", (resolution, resolution), color=(255, 255, 255))
-            canvas.paste(resized, ((resolution - new_w) // 2, (resolution - new_h) // 2))
+            canvas.paste(
+                resized, ((resolution - new_w) // 2, (resolution - new_h) // 2)
+            )
             fitted = canvas
 
         arr = np.asarray(fitted, dtype=np.float32) / 255.0
@@ -189,7 +191,9 @@ def main() -> int:
     x_naive = np.arange(len(naive_hist))
     x_improved = np.arange(len(improved_hist))
     ax_curve.plot(x_naive, naive_hist, color="tab:red", linewidth=2.0, label="Naive")
-    ax_curve.plot(x_improved, improved_hist, color="tab:blue", linewidth=2.0, label="Improved")
+    ax_curve.plot(
+        x_improved, improved_hist, color="tab:blue", linewidth=2.0, label="Improved"
+    )
     ax_curve.set_yscale("log")
     ax_curve.set_xlabel("Iteration")
     ax_curve.set_ylabel("Perceptual MSE (LAB)")
