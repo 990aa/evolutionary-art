@@ -24,8 +24,11 @@ class PreprocessedTarget:
     target_rgb: np.ndarray
     pyramid: list[np.ndarray]
     segmentation_map: np.ndarray
+    cluster_centroids_lab: np.ndarray
     cluster_centroids_rgb: np.ndarray
+    cluster_variances_lab: np.ndarray
     structure_map: np.ndarray
+    gradient_angle_map: np.ndarray
     complexity_score: float
     recommended_polygons: int
     recommended_k: int
@@ -72,7 +75,7 @@ def segment_image_lab(
     target_rgb: np.ndarray,
     k_clusters: int,
     random_seed: int = 0,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     if k_clusters < 2:
         raise ValueError("k_clusters must be at least 2.")
 
@@ -89,10 +92,22 @@ def segment_image_lab(
     centroids_rgb = color.lab2rgb(centroids_lab[np.newaxis, :, :])[0]
     centroids_rgb = np.clip(centroids_rgb, 0.0, 1.0).astype(np.float32, copy=False)
 
-    return seg_map, centroids_rgb
+    variances = np.zeros((k_clusters,), dtype=np.float32)
+    for cluster_id in range(k_clusters):
+        cluster_points = flat[labels == cluster_id]
+        if cluster_points.size == 0:
+            variances[cluster_id] = 1.0
+            continue
+        diffs = cluster_points - centroids_lab[cluster_id]
+        sq_dist = np.sum(np.square(diffs, dtype=np.float32), axis=1, dtype=np.float32)
+        variances[cluster_id] = float(np.mean(sq_dist, dtype=np.float32))
+
+    return seg_map, centroids_lab, centroids_rgb, variances
 
 
-def compute_structure_map(target_rgb: np.ndarray) -> np.ndarray:
+def compute_structure_and_direction(
+    target_rgb: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
     gray = np.mean(target_rgb.astype(np.float32, copy=False), axis=2)
     gx = sobel(gray, axis=1, mode="reflect")
     gy = sobel(gray, axis=0, mode="reflect")
@@ -101,10 +116,18 @@ def compute_structure_map(target_rgb: np.ndarray) -> np.ndarray:
     g_min = float(np.min(grad))
     g_max = float(np.max(grad))
     if g_max <= g_min + 1e-8:
-        return np.zeros_like(grad, dtype=np.float32)
+        structure = np.zeros_like(grad, dtype=np.float32)
+    else:
+        structure = (grad - g_min) / (g_max - g_min)
+        structure = np.clip(structure, 0.0, 1.0).astype(np.float32, copy=False)
 
-    norm = (grad - g_min) / (g_max - g_min)
-    return np.clip(norm, 0.0, 1.0).astype(np.float32, copy=False)
+    angles = np.arctan2(gy, gx).astype(np.float32, copy=False)
+    return structure, angles
+
+
+def compute_structure_map(target_rgb: np.ndarray) -> np.ndarray:
+    structure, _ = compute_structure_and_direction(target_rgb)
+    return structure
 
 
 def compute_complexity_score(target_rgb: np.ndarray, structure_map: np.ndarray) -> float:
@@ -168,11 +191,11 @@ def preprocess_target_array(
 
     base_target = _resize_float_image(target_rgb, PYRAMID_LEVEL_SIZES[0])
     pyramid = build_gaussian_pyramid(base_target, PYRAMID_LEVEL_SIZES)
-    structure_map = compute_structure_map(base_target)
+    structure_map, gradient_angle_map = compute_structure_and_direction(base_target)
     complexity = compute_complexity_score(base_target, structure_map)
 
     recommended_k = recommend_cluster_count(complexity)
-    segmentation_map, centroids_rgb = segment_image_lab(
+    segmentation_map, centroids_lab, centroids_rgb, variances_lab = segment_image_lab(
         base_target,
         k_clusters=recommended_k,
         random_seed=random_seed,
@@ -191,8 +214,11 @@ def preprocess_target_array(
         target_rgb=base_target,
         pyramid=pyramid,
         segmentation_map=segmentation_map,
+        cluster_centroids_lab=centroids_lab,
         cluster_centroids_rgb=centroids_rgb,
+        cluster_variances_lab=variances_lab,
         structure_map=structure_map,
+        gradient_angle_map=gradient_angle_map,
         complexity_score=complexity,
         recommended_polygons=polygons,
         recommended_k=recommended_k,
