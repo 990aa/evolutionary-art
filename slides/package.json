@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "copy:assets": "node scripts/copy-assets.mjs",
+    "pptx": "node scripts/generate-pptx.mjs",
     "build": "npm run copy:assets && tsc && vite build",
     "preview": "vite preview"
   },
