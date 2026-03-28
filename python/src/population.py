@@ -141,6 +141,7 @@ class PopulationHillClimber:
         self.non_primary_better_seen = False
         self._state_lock = threading.Lock()
         self._stop_event = threading.Event()
+        self._pause_event = threading.Event()
         self._barrier = threading.Barrier(len(self.optimizers) + 1)
         self._threads: list[threading.Thread] = []
         self._coordinator_thread: threading.Thread | None = None
@@ -180,6 +181,23 @@ class PopulationHillClimber:
     def running(self) -> bool:
         return any(self._variant_running)
 
+    @property
+    def paused(self) -> bool:
+        return self._pause_event.is_set()
+
+    def pause(self) -> None:
+        self._pause_event.set()
+
+    def resume(self) -> None:
+        self._pause_event.clear()
+
+    def toggle_pause(self) -> bool:
+        if self.paused:
+            self.resume()
+        else:
+            self.pause()
+        return self.paused
+
     def set_display_variant(self, variant_index: int) -> None:
         if 0 <= variant_index < len(self.optimizers):
             self.display_variant_index = int(variant_index)
@@ -189,6 +207,9 @@ class PopulationHillClimber:
         lock = self._variant_locks[variant_index]
 
         while not self._stop_event.is_set() and optimizer.iteration < self.max_iterations:
+            while self.paused and not self._stop_event.is_set():
+                time.sleep(0.01)
+
             with lock:
                 accepted = optimizer.step()
                 self._last_step_accepted[variant_index] = bool(accepted)
