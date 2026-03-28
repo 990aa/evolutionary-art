@@ -311,7 +311,8 @@ def run_live_display(
             flash_color, \
             last_seen_iteration, \
             eta_seconds, \
-            capture_done
+            capture_done, \
+            iter_rate
 
         if stop_event.is_set():
             anim.event_source.stop()
@@ -369,8 +370,10 @@ def run_live_display(
             if snap.primary_iteration % 100 == 0:
                 eta_seconds = _estimate_time_to_target(progress_window, target_mse)
             if len(progress_window) >= 2:
-                a_iter, a_time, _ = progress_window[0]
-                b_iter, b_time, _ = progress_window[-1]
+                a_iter = int(progress_window[0][0])
+                a_time = float(progress_window[0][1])
+                b_iter = int(progress_window[-1][0])
+                b_time = float(progress_window[-1][1])
                 if b_time > a_time and b_iter > a_iter:
                     iter_rate = (b_iter - a_iter) / (b_time - a_time)
 
