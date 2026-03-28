@@ -21,9 +21,9 @@ def test_phase3_progressive_growth_on_grape_beats_random_100() -> None:
         size_lr=0.0008,
         alpha_lr=0.08,
         render_chunk_size=50,
-        position_update_interval=20,
-        size_update_interval=25,
-        max_fd_polygons=0,
+        position_update_interval=6,
+        size_update_interval=10,
+        max_fd_polygons=6,
     )
 
     progressive_optimizer = LiveJointOptimizer(
@@ -37,7 +37,7 @@ def test_phase3_progressive_growth_on_grape_beats_random_100() -> None:
         progressive_optimizer,
         batch_schedule=[20, 20, 20, 20, 20],
         max_steps_per_cycle=70,
-        post_add_steps=14,
+        post_add_steps=20,
         convergence_window=100,
         convergence_rel_threshold=0.001,
         region_window=5,
