@@ -33,7 +33,9 @@ def default_variant_personalities() -> list[VariantPersonality]:
         VariantPersonality(name="large-polygons", size_multiplier=1.5),
         VariantPersonality(name="small-polygons", size_multiplier=0.5),
         VariantPersonality(
-            name="aggressive-maintenance", death_interval_iterations=200
+            name="random-baseline-aggressive",
+            random_placement_mode=True,
+            death_interval_iterations=200,
         ),
     ]
 
