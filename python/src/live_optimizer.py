@@ -27,6 +27,7 @@ class LiveOptimizerConfig:
     min_size: float = 1.0
     max_alpha: float = 1.0
     min_alpha: float = 0.0
+    exact_fd: bool = False
 
 
 class _AdamState:
@@ -131,6 +132,21 @@ class LiveJointOptimizer:
         size_x: float,
         size_y: float,
     ) -> float:
+        if self.config.exact_fd:
+            old_center = np.array(self.polygons.centers[index], copy=True)
+            old_size = np.array(self.polygons.sizes[index], copy=True)
+            try:
+                self.polygons.centers[index, 0] = float(center_x)
+                self.polygons.centers[index, 1] = float(center_y)
+                self.polygons.sizes[index, 0] = float(max(size_x, self.config.min_size))
+                self.polygons.sizes[index, 1] = float(max(size_y, self.config.min_size))
+
+                trial_render = self.rasterizer.render(self.polygons, softness=softness)
+                return self._loss(trial_render.canvas, self.target)
+            finally:
+                self.polygons.centers[index] = old_center
+                self.polygons.sizes[index] = old_size
+
         coverage_new = self.rasterizer.single_coverage_from_values(
             shape_type=int(self.polygons.shape_types[index]),
             center_x=float(center_x),

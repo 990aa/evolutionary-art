@@ -25,7 +25,7 @@ def test_joint_optimizer_color_and_position_converge_on_simple_rectangle() -> No
         sizes=np.array([[10.0, 10.0]], dtype=np.float32),
         rotations=np.array([0.0], dtype=np.float32),
         colors=np.array([[0.90, 0.10, 0.10]], dtype=np.float32),
-        alphas=np.array([0.85], dtype=np.float32),
+        alphas=np.array([1.00], dtype=np.float32),
         shape_types=np.array([SHAPE_QUAD], dtype=np.int32),
     )
 
@@ -41,6 +41,7 @@ def test_joint_optimizer_color_and_position_converge_on_simple_rectangle() -> No
             alpha_lr=0.0,
             position_eps_px=2.0,
             size_eps_ratio=0.10,
+            exact_fd=True,
         ),
     )
 
