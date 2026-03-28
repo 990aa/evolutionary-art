@@ -498,12 +498,14 @@ def progressive_growth(
             )
 
             base_loss = float(optimizer.loss_history[-1])
+            base_hf_error: float | None = None
             if use_high_frequency_targeting:
                 attempt_map = high_frequency_error_map(
                     optimizer.target,
                     optimizer.current_canvas,
                     sigma=residual_sigma,
                 )
+                base_hf_error = float(np.mean(attempt_map, dtype=np.float32))
             else:
                 attempt_map = np.sum(
                     (optimizer.target - optimizer.current_canvas) ** 2,
@@ -520,6 +522,8 @@ def progressive_growth(
                 float,
                 np.ndarray,
                 float,
+                float,
+                float | None,
             ] | None = None
 
             accepted = False
@@ -582,6 +586,23 @@ def progressive_growth(
                     shape_params=params,
                 )
                 new_loss = _refresh_optimizer_canvas(optimizer, softness=current_softness)
+                new_hf_error: float | None = None
+                if use_high_frequency_targeting:
+                    new_hf_error = float(
+                        np.mean(
+                            high_frequency_error_map(
+                                optimizer.target,
+                                optimizer.current_canvas,
+                                sigma=residual_sigma,
+                            ),
+                            dtype=np.float32,
+                        )
+                    )
+
+                if use_high_frequency_targeting and new_hf_error is not None:
+                    candidate_score = float(new_hf_error + 0.10 * new_loss)
+                else:
+                    candidate_score = float(new_loss)
 
                 candidate = (
                     (float(cx_i), float(cy_i)),
@@ -596,11 +617,23 @@ def progressive_growth(
                     float(rotation),
                     np.array(params, copy=True),
                     float(new_loss),
+                    candidate_score,
+                    new_hf_error,
                 )
-                if best_candidate is None or new_loss < best_candidate[-1]:
+                if best_candidate is None or candidate_score < best_candidate[-2]:
                     best_candidate = candidate
 
-                if new_loss <= base_loss:
+                accepted_now = bool(new_loss <= base_loss)
+                if (
+                    use_high_frequency_targeting
+                    and base_hf_error is not None
+                    and new_hf_error is not None
+                ):
+                    hf_improved = bool(new_hf_error < (base_hf_error - 1e-6))
+                    mse_guard = bool(new_loss <= (base_loss + 0.003))
+                    accepted_now = bool((hf_improved and mse_guard) or (new_loss <= base_loss))
+
+                if accepted_now:
                     accepted = True
                     target_center_used = target_center
                     break
@@ -611,7 +644,7 @@ def progressive_growth(
                 attempt_map[y0:y1, x0:x1] = 0.0
 
             if not accepted and best_candidate is not None:
-                placed_xy, best_color, sx, sy, selected_shape, rotation, params, _ = best_candidate
+                placed_xy, best_color, sx, sy, selected_shape, rotation, params, _, _, _ = best_candidate
                 px = int(np.clip(round(placed_xy[0]), 0, optimizer.rasterizer.width - 1))
                 py = int(np.clip(round(placed_xy[1]), 0, optimizer.rasterizer.height - 1))
                 neutral_color = tuple(float(v) for v in optimizer.current_canvas[py, px])
