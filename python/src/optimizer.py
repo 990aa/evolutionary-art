@@ -135,12 +135,12 @@ def select_shape_type(
         return ShapeType.ELLIPSE
 
     mag = float(structure_map[row, col])
-    if mag >= 0.60:
+    if mag >= 0.35:
         if phase == "Coarse":
             return ShapeType.QUADRILATERAL
         return ShapeType.TRIANGLE
 
-    if mag <= 0.22:
+    if mag <= 0.12:
         if phase == "Detail":
             return ShapeType.QUADRILATERAL
         return ShapeType.ELLIPSE
@@ -149,9 +149,9 @@ def select_shape_type(
 
 
 def _region_profile(magnitude: float) -> str:
-    if magnitude >= 0.60:
+    if magnitude >= 0.35:
         return "edge"
-    if magnitude <= 0.22:
+    if magnitude <= 0.12:
         return "flat"
     return "texture"
 
@@ -491,18 +491,31 @@ class HillClimbingOptimizer:
         candidate: Polygon,
         alpha_values: Sequence[float] = ALPHA_CANDIDATES,
     ) -> tuple[Polygon, np.ndarray, float]:
+        mask = polygon_mask((self.height, self.width), candidate)
+        if np.any(mask):
+            local_rgb_residual = float(
+                np.mean(np.abs(self.target[mask] - self.canvas[mask]), dtype=np.float32)
+            )
+        else:
+            local_rgb_residual = 1.0
+        local_residual_norm = float(np.clip(local_rgb_residual / 0.25, 0.0, 1.0))
+
         best_polygon = candidate
         best_canvas = render_polygon(self.canvas, candidate)
         best_mse = self._evaluate_multiscale_loss(best_canvas, self.iteration)
+        best_adjusted = best_mse
 
         for alpha in alpha_values:
             test_polygon = replace(candidate, alpha=float(alpha))
             test_canvas = render_polygon(self.canvas, test_polygon)
             test_mse = self._evaluate_multiscale_loss(test_canvas, self.iteration)
-            if test_mse < best_mse:
+            alpha_penalty = (1.0 - local_residual_norm) * (float(alpha) ** 2) * 12.0
+            adjusted_score = test_mse + alpha_penalty
+            if adjusted_score < best_adjusted:
                 best_polygon = test_polygon
                 best_canvas = test_canvas
                 best_mse = test_mse
+                best_adjusted = adjusted_score
 
         return best_polygon, best_canvas, best_mse
 
@@ -658,7 +671,8 @@ class HillClimbingOptimizer:
         removed = before_count - len(self.accepted_polygons)
         added = 0
 
-        for _ in range(removed):
+        replacement_budget = max(0, removed - 1)
+        for _ in range(replacement_budget):
             if (
                 self.max_polygons is not None
                 and self.accepted_count >= self.max_polygons

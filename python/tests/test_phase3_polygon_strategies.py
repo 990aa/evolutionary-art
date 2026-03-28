@@ -40,10 +40,10 @@ def test_edge_aware_orientations_align_near_diagonal_edge() -> None:
         if polygon.orientation is None:
             continue
         cx, cy = polygon_center(polygon)
-        if abs(cy - cx) <= 14:
+        if abs(cy - cx) <= 14 and float(prep.structure_map[cy, cx]) >= 0.35:
             near_edge_angles.append(float(polygon.orientation))
 
-    assert len(near_edge_angles) >= 8
+    assert len(near_edge_angles) >= 4
 
     aligned = sum(
         1

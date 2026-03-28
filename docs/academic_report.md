@@ -1,8 +1,5 @@
 # Attention-Guided Evolutionary Art: An Academic Report
 
-Name: Abdul Ahad  
-Reg. No.: 245805010
-
 ## Abstract
 This report presents a compact evolutionary image reconstruction system that approximates 100x100 RGB targets using transparent geometric primitives. The optimization algorithm is a hill-climbing search guided by a smoothed per-pixel error map. Candidate shapes are sampled more often in high-error regions, rendered with alpha blending, and accepted only if they reduce global mean squared error (MSE). A deterministic shape cycle (triangle, quadrilateral, ellipse) and a three-phase size schedule provide stable convergence and visual variety. Experiments on three targets (heart, logo, face) show monotonic error reduction and interpretable intermediate states. The implementation emphasizes reproducibility, testing, and real-time visualization.
 
