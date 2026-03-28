@@ -278,7 +278,13 @@ def run_live_display(
         fig.canvas.draw_idle()
         return raw_line, smooth_line, tip_dot, error_im, canvas_im, phase_overlay, stats_text
 
-    anim = FuncAnimation(fig, update, interval=update_interval_ms, blit=False)
+    anim = FuncAnimation(
+        fig,
+        update,
+        interval=update_interval_ms,
+        blit=False,
+        cache_frame_data=False,
+    )
     _ = anim
 
     plt.show()
