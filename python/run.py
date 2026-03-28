@@ -7,44 +7,36 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from src.display import run_live_display
-from src.output_tools import (
-    LOG_SNAPSHOT_ITERATIONS,
-    quality_vs_budget_analysis,
-    save_log_evolution_frames,
+from src.live_phase7 import (
+    build_phase7_plan,
+    run_phase7_headless,
+    run_phase7_live_display,
 )
 from src.preprocessing import preprocess_target_array
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run attention-guided evolutionary art on a custom image."
+        description="Phase 7 live evolutionary visualization for arbitrary images."
     )
     parser.add_argument("image_path", type=Path, help="Path to an input image.")
     parser.add_argument(
         "--polygons",
         type=int,
         default=None,
-        help="Override adaptive polygon budget.",
+        help="Override automatic polygon budget.",
     )
     parser.add_argument(
-        "--max-size",
+        "--minutes",
         type=float,
-        default=None,
-        help="Override coarse-phase maximum polygon size in pixels.",
-    )
-    parser.add_argument(
-        "--iterations",
-        type=int,
-        default=8000,
-        help="Maximum proposal iterations per variant.",
+        default=3.0,
+        help="Runtime budget in minutes.",
     )
     parser.add_argument(
         "--resolution",
         type=int,
-        choices=[200, 300],
         default=200,
-        help="Base preprocessing resolution (200 default, 300 opt-in).",
+        help="Base square resolution.",
     )
     parser.add_argument(
         "--fit-mode",
@@ -58,12 +50,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable interactive fit-mode prompt when --fit-mode=auto.",
     )
     parser.add_argument(
-        "--target-mse",
-        type=float,
-        default=0.01,
-        help="Target MSE used for convergence-time estimation.",
-    )
-    parser.add_argument(
         "--seed",
         type=int,
         default=42,
@@ -72,7 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--update-interval-ms",
         type=int,
-        default=100,
+        default=2000,
         help="Display refresh interval in milliseconds.",
     )
     parser.add_argument(
@@ -82,20 +68,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Auto-close live visualization after N seconds.",
     )
     parser.add_argument(
-        "--output-prefix",
-        type=str,
-        default=None,
-        help="Prefix for generated outputs (defaults to image filename stem).",
-    )
-    parser.add_argument(
-        "--skip-artifacts",
-        action="store_true",
-        help="Skip post-run artifact generation.",
-    )
-    parser.add_argument(
         "--no-display",
         action="store_true",
-        help="Run preprocessing and summary only (useful for tests/headless runs).",
+        help="Run optimization without opening the live UI.",
+    )
+    parser.add_argument(
+        "--iterations",
+        type=int,
+        default=None,
+        help="Compatibility/testing override for maximum optimizer iteration points.",
     )
     return parser
 
@@ -175,9 +156,7 @@ def _estimate_runtime_seconds(
     iter_rate = base_rate_200 * resolution_penalty * complexity_penalty
 
     target_factor = max(0.5, min(2.0, (0.01 / max(target_mse, 1e-6)) ** 0.35))
-    expected_iters = (
-        (1200.0 + 2600.0 * complexity) * target_factor * (resolution / 200.0) ** 2
-    )
+    expected_iters = (1200.0 + 2600.0 * complexity) * target_factor * (resolution / 200.0) ** 2
     usable_iters = min(float(max_iterations), expected_iters)
     eta_seconds = usable_iters / max(iter_rate, 1e-6)
 
@@ -189,8 +168,9 @@ def print_analysis(
     *,
     original_size: tuple[int, int],
     fit_mode: str,
-    iterations: int,
-    target_mse: float,
+    minutes: float,
+    polygon_budget: int,
+    plan,
     iter_rate: float | None,
     eta_seconds: float | None,
 ) -> None:
@@ -203,23 +183,29 @@ def print_analysis(
     print(f"target_size: {w}x{h}")
     print(f"complexity_score: {preprocessed.complexity_score:.4f}")
     print(f"recommended_polygons: {preprocessed.recommended_polygons}")
+    print(f"polygon_budget: {polygon_budget}")
     print(f"detected_color_regions: {unique_regions}")
     print(f"k_clusters: {preprocessed.recommended_k}")
     print(
         "pyramid_levels: "
         + ", ".join([f"{img.shape[1]}x{img.shape[0]}" for img in preprocessed.pyramid])
     )
-    print(
-        "size_schedule_px: "
-        + ", ".join(
-            [
-                f"coarse_start={preprocessed.recommended_size_schedule['coarse_start']:.1f}",
-                f"coarse_end={preprocessed.recommended_size_schedule['coarse_end']:.1f}",
-                f"structural_end={preprocessed.recommended_size_schedule['structural_end']:.1f}",
-                f"detail_end={preprocessed.recommended_size_schedule['detail_end']:.1f}",
-            ]
+    print(f"runtime_budget_minutes: {minutes:.2f}")
+
+    print("auto_rounds:")
+    for round_cfg in plan.rounds:
+        print(
+            "  "
+            + ", ".join(
+                [
+                    f"{round_cfg.name}",
+                    f"res={round_cfg.resolution}",
+                    f"batches={round_cfg.batch_schedule}",
+                    f"size=[{round_cfg.min_size:.2f},{round_cfg.max_size:.2f}]",
+                    f"steps={round_cfg.max_steps_per_cycle}/{round_cfg.post_add_steps}",
+                ]
+            )
         )
-    )
 
     if iter_rate is None:
         print("estimated_iteration_rate: unknown")
@@ -227,11 +213,9 @@ def print_analysis(
         print(f"estimated_iteration_rate: {iter_rate:,.0f} iterations/s")
 
     if eta_seconds is None:
-        print(f"estimated_time_to_mse_{target_mse:.4f}: unknown")
+        print("estimated_time_to_steady_state: unknown")
     else:
-        print(f"estimated_time_to_mse_{target_mse:.4f}: ~{eta_seconds:,.1f} s")
-
-    print(f"max_iterations: {iterations}")
+        print(f"estimated_time_to_steady_state: ~{eta_seconds:,.1f} s")
 
 
 def main() -> int:
@@ -254,18 +238,33 @@ def main() -> int:
         fit_mode=fit_mode,
     )
 
+    if args.resolution <= 0:
+        parser.error("--resolution must be positive")
+    if args.minutes <= 0.0 and args.iterations is None:
+        parser.error("Use --minutes > 0 or provide --iterations for a bounded run")
+
     preprocessed = preprocess_target_array(
         prepared_rgb,
         polygon_override=args.polygons,
-        max_size_override=args.max_size,
         random_seed=args.seed,
         base_resolution=args.resolution,
     )
 
+    polygon_budget = (
+        int(args.polygons)
+        if args.polygons is not None
+        else int(preprocessed.recommended_polygons)
+    )
+    plan = build_phase7_plan(
+        base_resolution=args.resolution,
+        polygon_budget=polygon_budget,
+        complexity_score=float(preprocessed.complexity_score),
+    )
+
     iter_rate, eta_seconds = _estimate_runtime_seconds(
         preprocessed,
-        max_iterations=args.iterations,
-        target_mse=args.target_mse,
+        max_iterations=max(500, polygon_budget * 40),
+        target_mse=0.01,
         seed=args.seed,
     )
 
@@ -273,67 +272,44 @@ def main() -> int:
         preprocessed,
         original_size=original_size,
         fit_mode=fit_mode,
-        iterations=args.iterations,
-        target_mse=args.target_mse,
+        minutes=float(args.minutes),
+        polygon_budget=polygon_budget,
+        plan=plan,
         iter_rate=iter_rate,
         eta_seconds=eta_seconds,
     )
 
     if args.no_display:
-        return 0
-
-    print("Launching population-assisted live visualization window...")
-    print(
-        "Controls: P pause/resume, S segmentation overlay, E error mode, R screenshot, Q quit, 1/2/3 variant view"
-    )
-
-    optimizer = run_live_display(
-        target_image=preprocessed.target_rgb,
-        target_pyramid=preprocessed.pyramid,
-        structure_map=preprocessed.structure_map,
-        gradient_angle_map=preprocessed.gradient_angle_map,
-        segmentation_map=preprocessed.segmentation_map,
-        cluster_centroids_lab=preprocessed.cluster_centroids_lab,
-        cluster_variances_lab=preprocessed.cluster_variances_lab,
-        max_iterations=args.iterations,
-        max_polygons=preprocessed.recommended_polygons,
-        size_schedule=preprocessed.recommended_size_schedule,
-        update_interval_ms=args.update_interval_ms,
-        random_seed=args.seed,
-        target_mse=args.target_mse,
-        close_after_seconds=args.close_after_seconds,
-        snapshot_iterations=set(LOG_SNAPSHOT_ITERATIONS),
-    )
-
-    prefix = (
-        args.output_prefix
-        if args.output_prefix is not None
-        else Path(args.image_path).stem.lower().replace(" ", "_")
-    )
+        result = run_phase7_headless(
+            target_image=preprocessed.target_rgb,
+            segmentation_map=preprocessed.segmentation_map,
+            plan=plan,
+            random_seed=args.seed,
+            minutes=float(args.minutes),
+            max_total_steps=args.iterations,
+        )
+    else:
+        print("Launching Phase 7 five-panel live visualization...")
+        print(
+            "Controls: P pause, S segmentation, E residual mode, R screenshot, Q quit, 1/2/3 or V view, G force growth, D decomposition pass, +/- softness"
+        )
+        result = run_phase7_live_display(
+            target_image=preprocessed.target_rgb,
+            segmentation_map=preprocessed.segmentation_map,
+            plan=plan,
+            random_seed=args.seed,
+            minutes=float(args.minutes),
+            update_interval_ms=args.update_interval_ms,
+            close_after_seconds=args.close_after_seconds,
+            max_total_steps=args.iterations,
+        )
 
     print("=== Run Summary ===")
-    print(f"final_iteration: {optimizer.iteration}")
-    print(f"accepted_polygons: {optimizer.accepted_count}")
-    print(f"final_mse: {optimizer.current_mse:.6f}")
-    print(f"mse_improvement: {optimizer.initial_mse - optimizer.current_mse:.6f}")
-
-    if not args.skip_artifacts:
-        outputs_dir = Path("outputs")
-        saved = save_log_evolution_frames(
-            optimizer,
-            output_dir=outputs_dir,
-            prefix=prefix,
-            iterations=LOG_SNAPSHOT_ITERATIONS,
-        )
-        quality_plot, quality_csv = quality_vs_budget_analysis(
-            optimizer,
-            output_dir=outputs_dir,
-            prefix=prefix,
-        )
-
-        print(f"saved_log_frames: {len(saved)}")
-        print(f"quality_curve: {quality_plot}")
-        print(f"quality_data: {quality_csv}")
+    print(f"final_iteration: {result.iterations}")
+    print(f"accepted_polygons: {result.polygon_count}")
+    print(f"final_mse: {result.final_loss:.6f}")
+    if result.loss_history:
+        print(f"mse_improvement: {result.loss_history[0] - result.final_loss:.6f}")
 
     return 0
 
