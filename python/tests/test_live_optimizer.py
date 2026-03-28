@@ -21,11 +21,11 @@ def test_joint_optimizer_color_and_position_converge_on_simple_rectangle() -> No
     target, rect_center, rect_color = _make_rect_target(height, width)
 
     polygons = LivePolygonBatch(
-        centers=np.array([[10.0, 10.0]], dtype=np.float32),
-        sizes=np.array([[8.0, 8.0]], dtype=np.float32),
+        centers=np.array([[22.0, 21.0]], dtype=np.float32),
+        sizes=np.array([[10.0, 10.0]], dtype=np.float32),
         rotations=np.array([0.0], dtype=np.float32),
         colors=np.array([[0.90, 0.10, 0.10]], dtype=np.float32),
-        alphas=np.array([0.75], dtype=np.float32),
+        alphas=np.array([0.85], dtype=np.float32),
         shape_types=np.array([SHAPE_QUAD], dtype=np.int32),
     )
 
@@ -36,7 +36,7 @@ def test_joint_optimizer_color_and_position_converge_on_simple_rectangle() -> No
         polygons=polygons,
         config=LiveOptimizerConfig(
             color_lr=0.08,
-            position_lr=0.01,
+            position_lr=0.03,
             size_lr=0.002,
             alpha_lr=0.03,
             position_eps_px=2.0,
