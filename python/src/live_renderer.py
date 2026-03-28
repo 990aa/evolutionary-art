@@ -8,6 +8,9 @@ import numpy as np
 SHAPE_TRIANGLE = 0
 SHAPE_QUAD = 1
 SHAPE_ELLIPSE = 2
+SHAPE_BEZIER_PATCH = 3
+SHAPE_THIN_STROKE = 4
+SHAPE_ANNULAR_SEGMENT = 5
 
 
 _TRIANGLE_LOCAL = np.array(
@@ -38,6 +41,7 @@ class LivePolygonBatch:
     colors: np.ndarray
     alphas: np.ndarray
     shape_types: np.ndarray
+    shape_params: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         self.centers = np.ascontiguousarray(self.centers, dtype=np.float32)
@@ -46,6 +50,9 @@ class LivePolygonBatch:
         self.colors = np.ascontiguousarray(self.colors, dtype=np.float32)
         self.alphas = np.ascontiguousarray(self.alphas, dtype=np.float32)
         self.shape_types = np.ascontiguousarray(self.shape_types, dtype=np.int32)
+        if self.shape_params is None:
+            self.shape_params = np.zeros((self.centers.shape[0], 6), dtype=np.float32)
+        self.shape_params = np.ascontiguousarray(self.shape_params, dtype=np.float32)
 
         if self.centers.ndim != 2 or self.centers.shape[1] != 2:
             raise ValueError("centers must have shape (N, 2).")
@@ -59,6 +66,8 @@ class LivePolygonBatch:
             raise ValueError("alphas must have shape (N,).")
         if self.shape_types.ndim != 1:
             raise ValueError("shape_types must have shape (N,).")
+        if self.shape_params.ndim != 2 or self.shape_params.shape[1] != 6:
+            raise ValueError("shape_params must have shape (N, 6).")
 
         count = self.centers.shape[0]
         if (
@@ -67,6 +76,7 @@ class LivePolygonBatch:
             or self.rotations.shape[0] != count
             or self.alphas.shape[0] != count
             or self.shape_types.shape[0] != count
+            or self.shape_params.shape[0] != count
         ):
             raise ValueError("All parameter arrays must have identical length N.")
 
@@ -85,6 +95,7 @@ class LivePolygonBatch:
             colors=np.array(self.colors, copy=True),
             alphas=np.array(self.alphas, copy=True),
             shape_types=np.array(self.shape_types, copy=True),
+            shape_params=np.array(self.shape_params, copy=True),
         )
 
 
@@ -238,6 +249,104 @@ class SoftRasterizer:
         signed = (1.0 - radial) * scale
         return self._sigmoid(signed / float(softness))
 
+    def _thin_stroke_coverage(
+        self,
+        starts: np.ndarray,
+        ends: np.ndarray,
+        widths: np.ndarray,
+        softness: float,
+    ) -> np.ndarray:
+        ax = starts[:, 0][:, None, None]
+        ay = starts[:, 1][:, None, None]
+        bx = ends[:, 0][:, None, None]
+        by = ends[:, 1][:, None, None]
+        w = np.maximum(widths, 0.5)[:, None, None]
+
+        px = self.grid_x[None, :, :]
+        py = self.grid_y[None, :, :]
+
+        abx = bx - ax
+        aby = by - ay
+        apx = px - ax
+        apy = py - ay
+
+        ab_len2 = np.maximum(abx * abx + aby * aby, 1e-6)
+        t = np.clip((apx * abx + apy * aby) / ab_len2, 0.0, 1.0)
+        cx = ax + t * abx
+        cy = ay + t * aby
+
+        dist = np.sqrt((px - cx) ** 2 + (py - cy) ** 2 + 1e-8)
+        signed = (w * 0.5) - dist
+        return self._sigmoid(signed / float(softness))
+
+    def _annular_segment_coverage(
+        self,
+        centers: np.ndarray,
+        sizes: np.ndarray,
+        angle_ranges: np.ndarray,
+        softness: float,
+    ) -> np.ndarray:
+        cx = centers[:, 0][:, None, None]
+        cy = centers[:, 1][:, None, None]
+        inner_r = np.maximum(np.minimum(sizes[:, 0], sizes[:, 1]), 0.5)[:, None, None]
+        outer_r = np.maximum(np.maximum(sizes[:, 0], sizes[:, 1]), 0.75)[:, None, None]
+
+        dx = self.grid_x[None, :, :] - cx
+        dy = self.grid_y[None, :, :] - cy
+        dist = np.sqrt(dx * dx + dy * dy + 1e-8)
+
+        inner_signed = dist - inner_r
+        outer_signed = outer_r - dist
+        radial_signed = np.minimum(inner_signed, outer_signed)
+
+        ang = np.mod(np.arctan2(dy, dx), 2.0 * np.pi)
+        start = np.mod(angle_ranges[:, 0], 2.0 * np.pi)[:, None, None]
+        end = np.mod(angle_ranges[:, 1], 2.0 * np.pi)[:, None, None]
+
+        sector_mask = np.where(start <= end, (ang >= start) & (ang <= end), (ang >= start) | (ang <= end))
+        radial_cov = self._sigmoid(radial_signed / float(softness))
+        return (radial_cov * sector_mask.astype(np.float32)).astype(np.float32, copy=False)
+
+    def _bezier_patch_coverage(
+        self,
+        centers: np.ndarray,
+        sizes: np.ndarray,
+        rotations: np.ndarray,
+        curvatures: np.ndarray,
+        softness: float,
+    ) -> np.ndarray:
+        # Curved quad approximation: corners from a rotated quad, with each edge
+        # bent by a midpoint control offset. The sampled boundary is treated as
+        # a high-vertex convex polygon for soft coverage.
+        base = self._quad_vertices(centers, sizes, rotations)
+        k = base.shape[0]
+        samples_per_edge = 10
+        boundary = np.zeros((k, 4 * samples_per_edge, 2), dtype=np.float32)
+
+        for edge_idx in range(4):
+            start_v = base[:, edge_idx]
+            end_v = base[:, (edge_idx + 1) % 4]
+            mid = 0.5 * (start_v + end_v)
+
+            edge = end_v - start_v
+            edge_norm = np.sqrt(np.sum(edge * edge, axis=1, keepdims=True) + 1e-8)
+            tangent = edge / edge_norm
+            normal = np.stack([-tangent[:, 1], tangent[:, 0]], axis=1)
+
+            curvature = curvatures[:, edge_idx : edge_idx + 1]
+            control = mid + normal * curvature
+
+            t = np.linspace(0.0, 1.0, samples_per_edge, dtype=np.float32)[None, :, None]
+            omt = 1.0 - t
+            pts = omt * omt * start_v[:, None, :] + 2.0 * omt * t * control[:, None, :] + t * t * end_v[:, None, :]
+
+            start_i = edge_idx * samples_per_edge
+            end_i = start_i + samples_per_edge
+            boundary[:, start_i:end_i, :] = pts
+
+        signed = self._convex_signed_distance(boundary)
+        return self._sigmoid(signed / float(softness))
+
     def coverage_batch(
         self,
         polygons: LivePolygonBatch,
@@ -262,6 +371,7 @@ class SoftRasterizer:
             centers = polygons.centers[start:end]
             sizes = polygons.sizes[start:end]
             rotations = polygons.rotations[start:end]
+            params = polygons.shape_params[start:end]
 
             tri_idx = np.where(shape_chunk == SHAPE_TRIANGLE)[0]
             if tri_idx.size > 0:
@@ -294,8 +404,43 @@ class SoftRasterizer:
                     softness_value,
                 )
 
+            bezier_idx = np.where(shape_chunk == SHAPE_BEZIER_PATCH)[0]
+            if bezier_idx.size > 0:
+                edge_curvatures = params[bezier_idx, :4]
+                max_curve = np.minimum(sizes[bezier_idx, 0], sizes[bezier_idx, 1]) * 0.35
+                edge_curvatures = np.clip(edge_curvatures, -max_curve[:, None], max_curve[:, None])
+                chunk_coverage[bezier_idx] = self._bezier_patch_coverage(
+                    centers[bezier_idx],
+                    sizes[bezier_idx],
+                    rotations[bezier_idx],
+                    edge_curvatures,
+                    softness_value,
+                )
+
+            stroke_idx = np.where(shape_chunk == SHAPE_THIN_STROKE)[0]
+            if stroke_idx.size > 0:
+                stroke_ends = params[stroke_idx, :2]
+                stroke_width = params[stroke_idx, 2]
+                chunk_coverage[stroke_idx] = self._thin_stroke_coverage(
+                    centers[stroke_idx],
+                    stroke_ends,
+                    stroke_width,
+                    softness_value,
+                )
+
+            annular_idx = np.where(shape_chunk == SHAPE_ANNULAR_SEGMENT)[0]
+            if annular_idx.size > 0:
+                angle_ranges = params[annular_idx, :2]
+                chunk_coverage[annular_idx] = self._annular_segment_coverage(
+                    centers[annular_idx],
+                    sizes[annular_idx],
+                    angle_ranges,
+                    softness_value,
+                )
+
             del chunk_coverage
-            del shape_chunk, centers, sizes, rotations, tri_idx, quad_idx, ellipse_idx
+            del shape_chunk, centers, sizes, rotations, params
+            del tri_idx, quad_idx, ellipse_idx, bezier_idx, stroke_idx, annular_idx
 
         return coverage.astype(np.float32, copy=False)
 
@@ -314,6 +459,7 @@ class SoftRasterizer:
         center = polygons.centers[index : index + 1]
         size = polygons.sizes[index : index + 1]
         rotation = polygons.rotations[index : index + 1]
+        params = polygons.shape_params[index : index + 1]
 
         if shape_type == SHAPE_TRIANGLE:
             vertices = self._triangle_vertices(center, size, rotation)
@@ -328,6 +474,26 @@ class SoftRasterizer:
         if shape_type == SHAPE_ELLIPSE:
             return self._ellipse_coverage(center, size, rotation, softness)[0]
 
+        if shape_type == SHAPE_BEZIER_PATCH:
+            edge_curvatures = np.clip(
+                params[:, :4],
+                -np.minimum(size[:, 0], size[:, 1])[:, None] * 0.35,
+                np.minimum(size[:, 0], size[:, 1])[:, None] * 0.35,
+            )
+            return self._bezier_patch_coverage(
+                center,
+                size,
+                rotation,
+                edge_curvatures,
+                softness,
+            )[0]
+
+        if shape_type == SHAPE_THIN_STROKE:
+            return self._thin_stroke_coverage(center, params[:, :2], params[:, 2], softness)[0]
+
+        if shape_type == SHAPE_ANNULAR_SEGMENT:
+            return self._annular_segment_coverage(center, size, params[:, :2], softness)[0]
+
         raise ValueError(f"Unsupported shape type code: {shape_type}")
 
     def single_coverage_from_values(
@@ -339,7 +505,11 @@ class SoftRasterizer:
         size_y: float,
         rotation: float,
         softness: float,
+        shape_params: np.ndarray | None = None,
     ) -> np.ndarray:
+        if shape_params is None:
+            shape_params = np.zeros((6,), dtype=np.float32)
+        params = np.asarray(shape_params, dtype=np.float32).reshape(6)
         batch = LivePolygonBatch(
             centers=np.array([[center_x, center_y]], dtype=np.float32),
             sizes=np.array([[size_x, size_y]], dtype=np.float32),
@@ -347,6 +517,7 @@ class SoftRasterizer:
             colors=np.array([[0.0, 0.0, 0.0]], dtype=np.float32),
             alphas=np.array([1.0], dtype=np.float32),
             shape_types=np.array([shape_type], dtype=np.int32),
+            shape_params=params.reshape(1, 6),
         )
         return self.single_coverage(batch, 0, softness)
 
@@ -434,6 +605,7 @@ def make_random_live_batch(
         size=count,
         replace=True,
     )
+    shape_params = np.zeros((count, 6), dtype=np.float32)
 
     return LivePolygonBatch(
         centers=centers,
@@ -442,4 +614,5 @@ def make_random_live_batch(
         colors=colors,
         alphas=alphas,
         shape_types=shape_types,
+        shape_params=shape_params,
     )

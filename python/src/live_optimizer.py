@@ -32,6 +32,7 @@ class LiveOptimizerConfig:
     render_chunk_size: int = 50
     position_update_interval: int = 1
     size_update_interval: int = 1
+    max_fd_polygons: int | None = 24
 
 
 class _AdamState:
@@ -139,6 +140,7 @@ class LiveJointOptimizer:
         center_y: float,
         size_x: float,
         size_y: float,
+        shape_params: np.ndarray,
     ) -> float:
         if self.config.exact_fd:
             old_center = np.array(self.polygons.centers[index], copy=True)
@@ -167,6 +169,7 @@ class LiveJointOptimizer:
             size_y=float(max(size_y, self.config.min_size)),
             rotation=float(self.polygons.rotations[index]),
             softness=softness,
+            shape_params=shape_params,
         )
 
         alpha = float(np.clip(self.polygons.alphas[index], 0.0, 1.0))
@@ -190,11 +193,22 @@ class LiveJointOptimizer:
 
         eps_pos = float(self.config.position_eps_px)
 
-        for i in range(n):
+        if self.config.max_fd_polygons is None or self.config.max_fd_polygons <= 0:
+            update_indices = np.arange(n, dtype=np.int32)
+        elif n <= self.config.max_fd_polygons:
+            update_indices = np.arange(n, dtype=np.int32)
+        else:
+            residual_map = np.sum((self.target - render.canvas) ** 2, axis=2, dtype=np.float32)
+            scores = np.einsum("nhw,hw->n", render.effective_alpha, residual_map, optimize=True)
+            topk = int(min(self.config.max_fd_polygons, n))
+            update_indices = np.argpartition(scores, -topk)[-topk:].astype(np.int32)
+
+        for i in update_indices:
             cx = float(self.polygons.centers[i, 0])
             cy = float(self.polygons.centers[i, 1])
             sx = float(self.polygons.sizes[i, 0])
             sy = float(self.polygons.sizes[i, 1])
+            params = self.polygons.shape_params[i]
 
             x_plus = self._local_trial_loss(
                 index=i,
@@ -204,6 +218,7 @@ class LiveJointOptimizer:
                 center_y=cy,
                 size_x=sx,
                 size_y=sy,
+                shape_params=params,
             )
             x_minus = self._local_trial_loss(
                 index=i,
@@ -213,6 +228,7 @@ class LiveJointOptimizer:
                 center_y=cy,
                 size_x=sx,
                 size_y=sy,
+                shape_params=params,
             )
             y_plus = self._local_trial_loss(
                 index=i,
@@ -222,6 +238,7 @@ class LiveJointOptimizer:
                 center_y=min(cy + eps_pos, self.rasterizer.height - 1.0),
                 size_x=sx,
                 size_y=sy,
+                shape_params=params,
             )
             y_minus = self._local_trial_loss(
                 index=i,
@@ -231,6 +248,7 @@ class LiveJointOptimizer:
                 center_y=max(cy - eps_pos, 0.0),
                 size_x=sx,
                 size_y=sy,
+                shape_params=params,
             )
 
             pos_grad[i, 0] = (x_plus - x_minus) / (2.0 * eps_pos)
@@ -252,6 +270,7 @@ class LiveJointOptimizer:
                 center_y=cy,
                 size_x=sx_plus_val,
                 size_y=sy,
+                shape_params=params,
             )
             sx_minus = self._local_trial_loss(
                 index=i,
@@ -261,6 +280,7 @@ class LiveJointOptimizer:
                 center_y=cy,
                 size_x=sx_minus_val,
                 size_y=sy,
+                shape_params=params,
             )
             sy_plus = self._local_trial_loss(
                 index=i,
@@ -270,6 +290,7 @@ class LiveJointOptimizer:
                 center_y=cy,
                 size_x=sx,
                 size_y=sy_plus_val,
+                shape_params=params,
             )
             sy_minus = self._local_trial_loss(
                 index=i,
@@ -279,6 +300,7 @@ class LiveJointOptimizer:
                 center_y=cy,
                 size_x=sx,
                 size_y=sy_minus_val,
+                shape_params=params,
             )
 
             sx_den = max(sx_plus_val - sx_minus_val, 1e-6)
@@ -443,7 +465,12 @@ class LiveJointOptimizer:
         alpha: float,
         shape_type: int = SHAPE_ELLIPSE,
         rotation: float = 0.0,
+        shape_params: np.ndarray | None = None,
     ) -> None:
+        if shape_params is None:
+            shape_params = np.zeros((6,), dtype=np.float32)
+        param_values = np.asarray(shape_params, dtype=np.float32).reshape(6)
+
         self.polygons.centers = np.concatenate(
             [
                 self.polygons.centers,
@@ -493,6 +520,10 @@ class LiveJointOptimizer:
         )
         self.polygons.shape_types = np.concatenate(
             [self.polygons.shape_types, np.array([int(shape_type)], dtype=np.int32)],
+            axis=0,
+        )
+        self.polygons.shape_params = np.concatenate(
+            [self.polygons.shape_params, param_values.reshape(1, 6)],
             axis=0,
         )
 

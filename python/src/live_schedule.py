@@ -6,9 +6,17 @@ from typing import Sequence
 
 import numpy as np
 from PIL import Image
+from scipy.ndimage import gaussian_filter, uniform_filter
 
 from src.live_optimizer import LiveJointOptimizer, LiveOptimizerConfig
-from src.live_renderer import SHAPE_ELLIPSE, LivePolygonBatch, SoftRasterizer
+from src.live_renderer import (
+    SHAPE_ANNULAR_SEGMENT,
+    SHAPE_BEZIER_PATCH,
+    SHAPE_ELLIPSE,
+    SHAPE_THIN_STROKE,
+    LivePolygonBatch,
+    SoftRasterizer,
+)
 
 
 @dataclass(frozen=True)
@@ -48,6 +56,13 @@ class MultiResolutionResult:
     final_loss: float
 
 
+@dataclass(frozen=True)
+class ResidualDecomposition:
+    residual: np.ndarray
+    low_frequency: np.ndarray
+    high_frequency: np.ndarray
+
+
 def default_growth_batch_schedule() -> list[int]:
     return [20, 20, 20, 20, 20, 10, 10, 10, 10, 10, 5, 5, 5, 5, 5, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2]
 
@@ -60,6 +75,7 @@ def make_empty_live_batch() -> LivePolygonBatch:
         colors=np.zeros((0, 3), dtype=np.float32),
         alphas=np.zeros((0,), dtype=np.float32),
         shape_types=np.zeros((0,), dtype=np.int32),
+        shape_params=np.zeros((0, 6), dtype=np.float32),
     )
 
 
@@ -95,6 +111,7 @@ def make_random_live_batch_with_bounds(
     colors = rng.uniform(0.0, 1.0, size=(count, 3)).astype(np.float32)
     alphas = rng.uniform(0.2, 0.9, size=count).astype(np.float32)
     shape_types = np.full((count,), SHAPE_ELLIPSE, dtype=np.int32)
+    shape_params = np.zeros((count, 6), dtype=np.float32)
 
     return LivePolygonBatch(
         centers=centers,
@@ -103,6 +120,7 @@ def make_random_live_batch_with_bounds(
         colors=colors,
         alphas=alphas,
         shape_types=shape_types,
+        shape_params=shape_params,
     )
 
 
@@ -148,6 +166,161 @@ def _is_converged(
     return _relative_loss_improvement(loss_history, window=window) < relative_threshold
 
 
+def decompose_residual(
+    target: np.ndarray,
+    canvas: np.ndarray,
+    *,
+    sigma: float = 10.0,
+) -> ResidualDecomposition:
+    if target.shape != canvas.shape:
+        raise ValueError("target and canvas must have identical shapes")
+
+    residual = np.clip(target - canvas, -1.0, 1.0).astype(np.float32, copy=False)
+    low = gaussian_filter(residual, sigma=(sigma, sigma, 0.0), mode="reflect").astype(
+        np.float32,
+        copy=False,
+    )
+    high = (residual - low).astype(np.float32, copy=False)
+    return ResidualDecomposition(
+        residual=residual,
+        low_frequency=low,
+        high_frequency=high,
+    )
+
+
+def high_frequency_error_map(
+    target: np.ndarray,
+    canvas: np.ndarray,
+    *,
+    sigma: float = 10.0,
+) -> np.ndarray:
+    comp = decompose_residual(target, canvas, sigma=sigma)
+    return np.sum(comp.high_frequency * comp.high_frequency, axis=2, dtype=np.float32)
+
+
+def apply_low_frequency_color_correction(
+    optimizer: LiveJointOptimizer,
+    *,
+    sigma: float = 10.0,
+    strength: float = 0.35,
+    softness: float = 0.5,
+) -> float:
+    if optimizer.polygons.count == 0:
+        return 0.0
+
+    before_loss = float(optimizer.loss_history[-1])
+    before_colors = np.array(optimizer.polygons.colors, copy=True)
+
+    comp = decompose_residual(optimizer.target, optimizer.current_canvas, sigma=sigma)
+    h, w = optimizer.target.shape[:2]
+
+    centers = np.round(optimizer.polygons.centers).astype(np.int32)
+    centers[:, 0] = np.clip(centers[:, 0], 0, w - 1)
+    centers[:, 1] = np.clip(centers[:, 1], 0, h - 1)
+
+    low_at_centers = comp.low_frequency[centers[:, 1], centers[:, 0]]
+    optimizer.polygons.colors = np.clip(
+        optimizer.polygons.colors + float(strength) * low_at_centers,
+        0.0,
+        1.0,
+    ).astype(np.float32, copy=False)
+
+    render = optimizer.rasterizer.render(
+        optimizer.polygons,
+        softness=softness,
+        chunk_size=optimizer.config.render_chunk_size,
+    )
+    after_loss = float(optimizer._loss(render.canvas, optimizer.target))
+
+    if after_loss <= before_loss:
+        optimizer.current_canvas = render.canvas
+        optimizer.loss_history.append(after_loss)
+        return float(before_loss - after_loss)
+
+    optimizer.polygons.colors = before_colors
+    return 0.0
+
+
+def _compute_structure_maps(
+    target: np.ndarray,
+    *,
+    window: int = 7,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    gray = np.mean(target, axis=2, dtype=np.float32)
+    gy, gx = np.gradient(gray)
+    magnitude = np.hypot(gx, gy).astype(np.float32, copy=False)
+    angle = np.arctan2(gy, gx).astype(np.float32, copy=False)
+
+    ux = np.cos(angle)
+    uy = np.sin(angle)
+    mean_ux = uniform_filter(ux, size=window, mode="reflect")
+    mean_uy = uniform_filter(uy, size=window, mode="reflect")
+    resultant = np.sqrt(mean_ux * mean_ux + mean_uy * mean_uy)
+
+    circularity = np.clip(1.0 - resultant, 0.0, 1.0).astype(np.float32, copy=False)
+    linearity = (magnitude * np.clip(resultant, 0.0, 1.0)).astype(np.float32, copy=False)
+    return magnitude, circularity, angle
+
+
+def _select_shape_type(
+    *,
+    x: int,
+    y: int,
+    magnitude_map: np.ndarray,
+    circularity_map: np.ndarray,
+) -> int:
+    mag = float(magnitude_map[y, x])
+    circ = float(circularity_map[y, x])
+
+    if circ >= 0.60 and mag >= 0.03:
+        return SHAPE_ANNULAR_SEGMENT
+    if mag >= 0.08 and circ <= 0.35:
+        return SHAPE_THIN_STROKE
+    if mag <= 0.03:
+        return SHAPE_BEZIER_PATCH
+    return SHAPE_ELLIPSE
+
+
+def _initialize_shape_params(
+    *,
+    shape_type: int,
+    center_x: float,
+    center_y: float,
+    size_x: float,
+    size_y: float,
+    angle_map: np.ndarray,
+    x0: int,
+    y0: int,
+    x1: int,
+    y1: int,
+) -> tuple[float, np.ndarray]:
+    shape_params = np.zeros((6,), dtype=np.float32)
+    rotation = 0.0
+
+    if shape_type == SHAPE_THIN_STROKE:
+        theta = float(angle_map[int(center_y), int(center_x)])
+        length = float(max(size_x, size_y) * 2.0)
+        x_end = float(center_x + np.cos(theta) * length)
+        y_end = float(center_y + np.sin(theta) * length)
+        width = float(max(1.5, min(size_x, size_y) * 0.6))
+        shape_params[0] = x_end
+        shape_params[1] = y_end
+        shape_params[2] = width
+
+    elif shape_type == SHAPE_ANNULAR_SEGMENT:
+        theta = float(angle_map[int(center_y), int(center_x)])
+        sweep = float(np.pi * 0.6)
+        shape_params[0] = float(theta - sweep * 0.5)
+        shape_params[1] = float(theta + sweep * 0.5)
+
+    elif shape_type == SHAPE_BEZIER_PATCH:
+        patch_scale = float(max(size_x, size_y))
+        shape_params[:4] = np.array([0.25, -0.15, 0.20, -0.10], dtype=np.float32) * patch_scale
+        rotation = float(angle_map[int(center_y), int(center_x)] + np.pi * 0.5)
+
+    return rotation, shape_params
+
+
 def _region_sum_map(error_map: np.ndarray, window: int) -> np.ndarray:
     if window <= 0:
         raise ValueError("window must be positive")
@@ -175,6 +348,7 @@ def highest_error_region_center(
     canvas: np.ndarray,
     *,
     window: int = 5,
+    guide_map: np.ndarray | None = None,
 ) -> tuple[tuple[float, float], tuple[int, int, int, int], np.ndarray]:
     if target.shape != canvas.shape:
         raise ValueError("target and canvas must have identical shapes")
@@ -184,7 +358,12 @@ def highest_error_region_center(
     if actual_window <= 0:
         raise ValueError("window must be positive")
 
-    error_map = np.sum((target - canvas) ** 2, axis=2, dtype=np.float32)
+    if guide_map is None:
+        error_map = np.sum((target - canvas) ** 2, axis=2, dtype=np.float32)
+    else:
+        if guide_map.shape != target.shape[:2]:
+            raise ValueError("guide_map must have shape (H, W)")
+        error_map = np.clip(guide_map.astype(np.float32, copy=False), 0.0, None)
     region_scores = _region_sum_map(error_map, actual_window)
 
     max_index = int(np.argmax(region_scores))
@@ -264,6 +443,10 @@ def progressive_growth(
     min_new_size: float = 2.5,
     max_new_size: float | None = None,
     shape_type: int = SHAPE_ELLIPSE,
+    use_content_aware_shapes: bool = True,
+    use_high_frequency_targeting: bool = False,
+    residual_sigma: float = 10.0,
+    low_frequency_correction_strength: float = 0.35,
     start_softness: float = 2.0,
     end_softness: float = 0.5,
 ) -> tuple[list[GrowthCycleResult], list[GrowthEvent]]:
@@ -271,12 +454,82 @@ def progressive_growth(
     events: list[GrowthEvent] = []
 
     estimated_steps = max(1, len(batch_schedule) * (max_steps_per_cycle + post_add_steps))
+    mag_map, circ_map, angle_map = _compute_structure_maps(optimizer.target)
 
-    for cycle_index, batch_size in enumerate(batch_schedule):
+    if optimizer.polygons.count == 0 and batch_schedule:
+        seed_count = int(batch_schedule[0])
+        target_map = (
+            high_frequency_error_map(optimizer.target, optimizer.current_canvas, sigma=residual_sigma)
+            if use_high_frequency_targeting
+            else None
+        )
+        for _ in range(seed_count):
+            target_center, (x0, y0, x1, y1), patch_color = highest_error_region_center(
+                optimizer.target,
+                optimizer.current_canvas,
+                window=region_window,
+                guide_map=target_map,
+            )
+            target_size = float(region_window)
+            sx = float(np.clip(target_size, min_new_size, max_new_size or target_size))
+            sy = float(np.clip(target_size, min_new_size, max_new_size or target_size))
+
+            cx_i = int(np.clip(round(target_center[0]), 0, optimizer.rasterizer.width - 1))
+            cy_i = int(np.clip(round(target_center[1]), 0, optimizer.rasterizer.height - 1))
+
+            selected_shape = (
+                _select_shape_type(x=cx_i, y=cy_i, magnitude_map=mag_map, circularity_map=circ_map)
+                if use_content_aware_shapes
+                else shape_type
+            )
+            rotation, params = _initialize_shape_params(
+                shape_type=selected_shape,
+                center_x=float(cx_i),
+                center_y=float(cy_i),
+                size_x=sx,
+                size_y=sy,
+                angle_map=angle_map,
+                x0=x0,
+                y0=y0,
+                x1=x1,
+                y1=y1,
+            )
+
+            optimizer.add_polygon(
+                center_x=float(cx_i),
+                center_y=float(cy_i),
+                size_x=sx,
+                size_y=sy,
+                color=(
+                    float(np.clip(patch_color[0], 0.0, 1.0)),
+                    float(np.clip(patch_color[1], 0.0, 1.0)),
+                    float(np.clip(patch_color[2], 0.0, 1.0)),
+                ),
+                alpha=float(np.clip(new_polygon_alpha, 0.0, 1.0)),
+                shape_type=selected_shape,
+                rotation=rotation,
+                shape_params=params,
+            )
+
+            current_softness = _softness_for_step(
+                step_index=optimizer.step_count,
+                horizon_steps=estimated_steps,
+                start_softness=start_softness,
+                end_softness=end_softness,
+            )
+            _refresh_optimizer_canvas(optimizer, softness=current_softness)
+
+    effective_schedule = list(batch_schedule)
+    if optimizer.polygons.count == batch_schedule[0] and effective_schedule:
+        effective_schedule = effective_schedule[1:]
+
+    for cycle_index, batch_size in enumerate(effective_schedule):
         if batch_size <= 0:
             continue
 
         loss_before_cycle = float(optimizer.loss_history[-1])
+        best_cycle_loss = loss_before_cycle
+        best_polygons = optimizer.polygons.copy()
 
         pre_steps, converged = optimize_until_converged(
             optimizer,
@@ -291,19 +544,46 @@ def progressive_growth(
         loss_before_add = float(optimizer.loss_history[-1])
 
         for _ in range(int(batch_size)):
+            target_map = (
+                high_frequency_error_map(optimizer.target, optimizer.current_canvas, sigma=residual_sigma)
+                if use_high_frequency_targeting
+                else None
+            )
             target_center, _, patch_color = highest_error_region_center(
                 optimizer.target,
                 optimizer.current_canvas,
                 window=region_window,
+                guide_map=target_map,
             )
 
-            target_size = float(region_window) * 0.5
+            target_size = float(region_window)
             sx = float(np.clip(target_size, min_new_size, max_new_size or target_size))
             sy = float(np.clip(target_size, min_new_size, max_new_size or target_size))
 
+            cx_i = int(np.clip(round(target_center[0]), 0, optimizer.rasterizer.width - 1))
+            cy_i = int(np.clip(round(target_center[1]), 0, optimizer.rasterizer.height - 1))
+
+            selected_shape = (
+                _select_shape_type(x=cx_i, y=cy_i, magnitude_map=mag_map, circularity_map=circ_map)
+                if use_content_aware_shapes
+                else shape_type
+            )
+            rotation, params = _initialize_shape_params(
+                shape_type=selected_shape,
+                center_x=float(cx_i),
+                center_y=float(cy_i),
+                size_x=sx,
+                size_y=sy,
+                angle_map=angle_map,
+                x0=0,
+                y0=0,
+                x1=0,
+                y1=0,
+            )
+
             optimizer.add_polygon(
-                center_x=target_center[0],
-                center_y=target_center[1],
+                center_x=float(cx_i),
+                center_y=float(cy_i),
                 size_x=sx,
                 size_y=sy,
                 color=(
@@ -312,8 +592,9 @@ def progressive_growth(
                     float(np.clip(patch_color[2], 0.0, 1.0)),
                 ),
                 alpha=float(np.clip(new_polygon_alpha, 0.0, 1.0)),
-                shape_type=shape_type,
-                rotation=0.0,
+                shape_type=selected_shape,
+                rotation=rotation,
+                shape_params=params,
             )
 
             current_softness = _softness_for_step(
@@ -323,6 +604,10 @@ def progressive_growth(
                 end_softness=end_softness,
             )
             _refresh_optimizer_canvas(optimizer, softness=current_softness)
+
+            if optimizer.loss_history[-1] < best_cycle_loss:
+                best_cycle_loss = float(optimizer.loss_history[-1])
+                best_polygons = optimizer.polygons.copy()
 
             placed = optimizer.polygons.centers[-1]
             distance = float(
@@ -350,6 +635,26 @@ def progressive_growth(
             )
             optimizer.step(softness=softness)
             post_steps += 1
+
+            if optimizer.loss_history[-1] < best_cycle_loss:
+                best_cycle_loss = float(optimizer.loss_history[-1])
+                best_polygons = optimizer.polygons.copy()
+
+        apply_low_frequency_color_correction(
+            optimizer,
+            sigma=residual_sigma,
+            strength=low_frequency_correction_strength,
+            softness=end_softness,
+        )
+
+        if float(optimizer.loss_history[-1]) >= loss_before_cycle and best_cycle_loss < loss_before_cycle:
+            optimizer.polygons = best_polygons
+            _refresh_optimizer_canvas(optimizer, softness=end_softness)
+
+        recovery_steps = 0
+        while float(optimizer.loss_history[-1]) >= loss_before_cycle and recovery_steps < max(20, post_add_steps * 2):
+            optimizer.step(softness=end_softness)
+            recovery_steps += 1
 
         cycle_results.append(
             GrowthCycleResult(
@@ -463,6 +768,9 @@ def run_multi_resolution_schedule(
             cfg,
             min_size=size_bounds[0],
             max_size=size_bounds[1],
+            max_fd_polygons=12,
+            position_update_interval=max(cfg.position_update_interval, 6),
+            size_update_interval=max(cfg.size_update_interval, 10),
         )
 
         optimizer = LiveJointOptimizer(
@@ -485,6 +793,10 @@ def run_multi_resolution_schedule(
             min_new_size=size_bounds[0],
             max_new_size=size_bounds[1],
             shape_type=SHAPE_ELLIPSE,
+            use_content_aware_shapes=True,
+            use_high_frequency_targeting=True,
+            residual_sigma=10.0,
+            low_frequency_correction_strength=0.35,
             start_softness=2.0,
             end_softness=0.5,
         )
