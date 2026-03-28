@@ -93,7 +93,7 @@ class SoftRenderResult:
     canvas: np.ndarray
     coverage: np.ndarray
     effective_alpha: np.ndarray
-    trans_before: np.ndarray
+    trans_after: np.ndarray
 
 
 class SoftRasterizer:
@@ -360,20 +360,21 @@ class SoftRasterizer:
                 canvas=np.array(base, copy=True),
                 coverage=empty,
                 effective_alpha=empty,
-                trans_before=empty,
+                trans_after=empty,
             )
 
         one_minus_alpha = np.clip(1.0 - effective_alpha, 0.0, 1.0).astype(
             np.float32, copy=False
         )
-        inclusive_trans = np.cumprod(one_minus_alpha, axis=0, dtype=np.float32)
+        reverse_cumprod = np.cumprod(one_minus_alpha[::-1], axis=0, dtype=np.float32)
+        inclusive_trans = reverse_cumprod[::-1]
 
-        trans_before = np.empty_like(one_minus_alpha)
-        trans_before[0] = 1.0
+        trans_after = np.empty_like(one_minus_alpha)
+        trans_after[-1] = 1.0
         if n > 1:
-            trans_before[1:] = inclusive_trans[:-1]
+            trans_after[:-1] = inclusive_trans[1:]
 
-        weights = trans_before * effective_alpha
+        weights = trans_after * effective_alpha
         layer_rgb = np.einsum("nhw,nc->hwc", weights, polygons.colors, optimize=True)
         canvas = layer_rgb + base * inclusive_trans[-1][:, :, None]
         canvas = np.clip(canvas, 0.0, 1.0).astype(np.float32, copy=False)
@@ -382,7 +383,7 @@ class SoftRasterizer:
             canvas=canvas,
             coverage=coverage,
             effective_alpha=effective_alpha,
-            trans_before=trans_before,
+            trans_after=trans_after,
         )
 
 
