@@ -108,6 +108,8 @@ def test_phase6_residual_decomposition_and_targeting() -> None:
         use_high_frequency_targeting=False,
         residual_sigma=10.0,
         low_frequency_correction_strength=0.0,
+        max_add_attempts=1,
+        enforce_cycle_improvement=False,
         start_softness=1.0,
         end_softness=0.6,
     )
@@ -135,6 +137,8 @@ def test_phase6_residual_decomposition_and_targeting() -> None:
         use_high_frequency_targeting=True,
         residual_sigma=10.0,
         low_frequency_correction_strength=0.0,
+        max_add_attempts=1,
+        enforce_cycle_improvement=False,
         start_softness=1.0,
         end_softness=0.6,
     )
