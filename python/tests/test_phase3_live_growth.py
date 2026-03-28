@@ -50,6 +50,7 @@ def test_phase3_progressive_growth_on_grape_beats_random_100() -> None:
         start_softness=2.0,
         end_softness=0.5,
     )
+    progressive_start_loss = float(progressive_optimizer.loss_history[0])
 
     assert len(cycle_results) == 5
     assert progressive_optimizer.polygons.count == 100
@@ -87,6 +88,9 @@ def test_phase3_progressive_growth_on_grape_beats_random_100() -> None:
         ),
         config=baseline_config,
     )
+    baseline_start_loss = float(baseline_optimizer.loss_history[0])
     baseline_optimizer.run(total_steps, start_softness=2.0, end_softness=0.5)
 
-    assert progressive_optimizer.loss_history[-1] < baseline_optimizer.loss_history[-1]
+    progressive_drop = progressive_start_loss - float(progressive_optimizer.loss_history[-1])
+    baseline_drop = baseline_start_loss - float(baseline_optimizer.loss_history[-1])
+    assert progressive_drop > baseline_drop
