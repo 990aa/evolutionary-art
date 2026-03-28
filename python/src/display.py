@@ -34,6 +34,40 @@ class UIState:
     quit_requested: bool = False
 
 
+def handle_control_key(
+    key: str,
+    *,
+    ui: UIState,
+    population: PopulationHillClimber,
+    screenshot_callback,
+    quit_callback,
+) -> str:
+    normalized = (key or "").lower()
+
+    if normalized == "p":
+        ui.paused = population.toggle_pause()
+        return "pause"
+    if normalized == "s":
+        ui.show_segmentation_overlay = not ui.show_segmentation_overlay
+        return "segmentation-toggle"
+    if normalized == "e":
+        ui.error_mode_index = (ui.error_mode_index + 1) % len(ERROR_MODES)
+        return "error-mode-cycle"
+    if normalized == "r":
+        screenshot_callback()
+        return "screenshot"
+    if normalized == "q":
+        ui.quit_requested = True
+        quit_callback()
+        return "quit"
+    if normalized in {"1", "2", "3"}:
+        ui.display_variant_index = int(normalized) - 1
+        population.set_display_variant(ui.display_variant_index)
+        return "variant-switch"
+
+    return "noop"
+
+
 ERROR_MODES: tuple[tuple[str, str], ...] = (
     ("rgb", "Raw RGB MSE"),
     ("structure", "Structure-Weighted Error"),
@@ -232,30 +266,17 @@ def run_live_display(
 
     def _on_key(event) -> None:
         nonlocal ui
-        key = (event.key or "").lower()
-
-        if key == "p":
-            ui.paused = population.toggle_pause()
-            return
-        if key == "s":
-            ui.show_segmentation_overlay = not ui.show_segmentation_overlay
-            return
-        if key == "e":
-            ui.error_mode_index = (ui.error_mode_index + 1) % len(ERROR_MODES)
-            return
-        if key == "r":
-            _save_screenshot(prefix="manual_capture")
-            return
-        if key == "q":
-            ui.quit_requested = True
-            stop_event.set()
-            population.stop()
-            plt.close(fig)
-            return
-        if key in {"1", "2", "3"}:
-            ui.display_variant_index = int(key) - 1
-            population.set_display_variant(ui.display_variant_index)
-            return
+        handle_control_key(
+            event.key,
+            ui=ui,
+            population=population,
+            screenshot_callback=lambda: _save_screenshot(prefix="manual_capture"),
+            quit_callback=lambda: (
+                stop_event.set(),
+                population.stop(),
+                plt.close(fig),
+            ),
+        )
 
     fig.canvas.mpl_connect("close_event", _on_close)
     fig.canvas.mpl_connect("key_press_event", _on_key)
