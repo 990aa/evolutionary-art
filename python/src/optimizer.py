@@ -174,6 +174,11 @@ class HillClimbingOptimizer:
         cluster_variances_lab: np.ndarray | None = None,
         size_schedule: dict[str, float] | None = None,
         max_polygons: int | None = None,
+        structure_weight_scale: float = 1.0,
+        structure_bias_mode: str = "normal",
+        size_multiplier: float = 1.0,
+        random_placement_mode: bool = False,
+        death_interval_iterations: int = 1000,
     ) -> None:
         if max_iterations <= 0:
             raise ValueError("max_iterations must be positive.")
@@ -183,11 +188,24 @@ class HillClimbingOptimizer:
             raise ValueError("target_image must have shape (H, W, 3).")
         if max_polygons is not None and max_polygons <= 0:
             raise ValueError("max_polygons must be positive when provided.")
+        if structure_weight_scale <= 0.0:
+            raise ValueError("structure_weight_scale must be positive.")
+        if size_multiplier <= 0.0:
+            raise ValueError("size_multiplier must be positive.")
+        if death_interval_iterations <= 0:
+            raise ValueError("death_interval_iterations must be positive.")
+        if structure_bias_mode not in {"normal", "flat", "edge"}:
+            raise ValueError("structure_bias_mode must be one of: normal, flat, edge")
 
         self.max_iterations = max_iterations
         self.snapshot_interval = snapshot_interval
         self.error_sigma = error_sigma
         self.max_polygons = max_polygons
+        self.structure_weight_scale = float(structure_weight_scale)
+        self.structure_bias_mode = structure_bias_mode
+        self.size_multiplier = float(size_multiplier)
+        self.random_placement_mode = bool(random_placement_mode)
+        self.death_interval_iterations = int(death_interval_iterations)
 
         self.rng = np.random.default_rng(random_seed)
         if random_seed is not None:
@@ -365,23 +383,21 @@ class HillClimbingOptimizer:
 
         phase = get_phase_name(iteration, self.max_iterations)
         if phase == "Coarse":
-            return 0.10
+            base = 0.10
         if phase == "Structural":
-            return 0.75
-        return 0.30
+            base = 0.75
+        if phase == "Detail":
+            base = 0.30
+
+        if self.structure_bias_mode == "edge":
+            return base * (3.0 * self.structure_weight_scale)
+        return base * self.structure_weight_scale
 
     def _loss_weights(self, iteration: int) -> tuple[float, float]:
-        phase = get_phase_name(iteration, self.max_iterations)
-        if phase == "Coarse":
-            return 0.8, 0.2
-        if phase == "Detail":
-            return 0.2, 0.8
-
-        coarse_end, structural_end = phase_transition_iterations(self.max_iterations)
-        span = max(1, structural_end - coarse_end)
-        t = (iteration - coarse_end) / span
-        coarse_weight = _linear(0.8, 0.2, t)
-        return coarse_weight, 1.0 - coarse_weight
+        progress = float(np.clip(iteration / max(self.max_iterations, 1), 0.0, 1.0))
+        fine_weight = 1.0 / (1.0 + np.exp(-8.0 * (progress - 0.4)))
+        coarse_weight = 1.0 - fine_weight
+        return float(coarse_weight), float(fine_weight)
 
     def _compute_level_mse(
         self,
@@ -427,10 +443,20 @@ class HillClimbingOptimizer:
         if edge_weight <= 0.0:
             return raw_error
 
-        guided = raw_error * (1.0 + edge_weight * self.structure_map)
+        if self.structure_bias_mode == "flat":
+            structure_component = 1.0 - self.structure_map
+        else:
+            structure_component = self.structure_map
+
+        guided = raw_error * (1.0 + edge_weight * structure_component)
         return guided.astype(np.float32, copy=False)
 
     def _sample_center_from_error_distribution(self) -> tuple[int, int, int]:
+        if self.random_placement_mode:
+            sampled_index = int(self.rng.integers(0, self.height * self.width))
+            row, col = divmod(sampled_index, self.width)
+            return sampled_index, row, col
+
         processed_map = process_error_map(
             self.current_error_map, sigma=self.error_sigma
         )
@@ -692,6 +718,7 @@ class HillClimbingOptimizer:
             self.max_iterations,
             size_schedule=self.size_schedule,
         )
+        size_px *= self.size_multiplier
 
         candidate = self._make_candidate(sampled_row, sampled_col, size_px)
         candidate, parent_canvas, parent_mse = self.select_best_alpha(candidate)
@@ -735,7 +762,7 @@ class HillClimbingOptimizer:
         if accepted and self.accepted_count > 0 and self.accepted_count % 500 == 0:
             self.run_palette_refinement_pass()
 
-        if self.iteration % 1000 == 0:
+        if self.iteration % self.death_interval_iterations == 0:
             self.run_polygon_death_and_replacement(contribution_threshold=1e-4)
 
         self.current_error_map = self._compute_guided_error_map(
