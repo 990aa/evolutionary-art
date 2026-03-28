@@ -137,6 +137,7 @@ def run_live_display(
     size_schedule: dict[str, float] | None = None,
     max_polygons: int | None = None,
     target_mse: float = 0.01,
+    snapshot_iterations: set[int] | None = None,
 ) -> HillClimbingOptimizer:
     del max_polygons  # population phase uses iteration-bound runs.
 
@@ -151,6 +152,7 @@ def run_live_display(
         cluster_variances_lab=cluster_variances_lab,
         size_schedule=size_schedule,
         random_seed=random_seed,
+        snapshot_iterations=snapshot_iterations,
     )
     population.start()
 
@@ -261,6 +263,7 @@ def run_live_display(
     stop_event = threading.Event()
     progress_window: deque[tuple[int, float, float]] = deque(maxlen=600)
     eta_seconds: float | None = None
+    iter_rate: float | None = None
 
     flash_alpha = 0.0
     flash_color = "gray"
@@ -365,6 +368,11 @@ def run_live_display(
             )
             if snap.primary_iteration % 100 == 0:
                 eta_seconds = _estimate_time_to_target(progress_window, target_mse)
+            if len(progress_window) >= 2:
+                a_iter, a_time, _ = progress_window[0]
+                b_iter, b_time, _ = progress_window[-1]
+                if b_time > a_time and b_iter > a_iter:
+                    iter_rate = (b_iter - a_iter) / (b_time - a_time)
 
         eta_text = "~unknown"
         if eta_seconds is not None:
@@ -374,6 +382,10 @@ def run_live_display(
                 eta_text = f"~{eta_seconds / 3600.0:4.2f} h"
             else:
                 eta_text = f"~{eta_seconds:5.1f} s"
+
+        rate_text = "unknown"
+        if iter_rate is not None:
+            rate_text = f"{iter_rate:,.0f} iter/s"
 
         stats_text.set_text(
             "\n".join(
@@ -388,6 +400,11 @@ def run_live_display(
                     f"acceptance      : {snap.acceptance_rate * 100.0:6.2f}%",
                     f"accepted polys  : {snap.accepted_count}",
                     f"phase           : {snap.phase_name}",
+                    f"throughput      : {rate_text}",
+                    (
+                        f"recombine       : {snap.recombination_successes}/{snap.recombination_attempts}"
+                    ),
+                    f"diversity seen  : {snap.diversity_observed}",
                     f"target mse      : {target_mse:.4f}",
                     f"eta             : {eta_text}",
                     f"paused          : {population.paused}",

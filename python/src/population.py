@@ -63,6 +63,9 @@ class PopulationSnapshot:
     structure_map: np.ndarray | None
     primary_index: int
     best_index: int
+    recombination_successes: int
+    recombination_attempts: int
+    diversity_observed: bool
 
 
 class PopulationHillClimber:
@@ -81,6 +84,7 @@ class PopulationHillClimber:
         random_seed: int | None,
         personalities: list[VariantPersonality] | None = None,
         recombination_interval: int = 500,
+        snapshot_iterations: set[int] | None = None,
     ) -> None:
         if max_iterations <= 0:
             raise ValueError("max_iterations must be positive")
@@ -90,6 +94,9 @@ class PopulationHillClimber:
         self.target_image = target_image.astype(np.float32, copy=False)
         self.max_iterations = int(max_iterations)
         self.recombination_interval = int(recombination_interval)
+        self.snapshot_iterations = (
+            set() if snapshot_iterations is None else {int(i) for i in snapshot_iterations if int(i) > 0}
+        )
 
         self.personalities = (
             default_variant_personalities() if personalities is None else personalities
@@ -121,6 +128,7 @@ class PopulationHillClimber:
                 size_multiplier=personality.size_multiplier,
                 random_placement_mode=personality.random_placement_mode,
                 death_interval_iterations=personality.death_interval_iterations,
+                snapshot_iterations=self.snapshot_iterations,
             )
             self.optimizers.append(optimizer)
             self._variant_locks.append(threading.Lock())
@@ -147,6 +155,8 @@ class PopulationHillClimber:
         self._history_iterations: list[int] = []
 
         self.non_primary_better_seen = False
+        self.recombination_successes = 0
+        self.recombination_attempts = 0
         self._state_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._pause_event = threading.Event()
@@ -312,6 +322,7 @@ class PopulationHillClimber:
         return primary.evaluate_canvas_loss(isolated_canvas)
 
     def run_recombination_step(self) -> bool:
+        self.recombination_attempts += 1
         mse_pairs: list[tuple[int, float]] = []
         for idx, lock in enumerate(self._variant_locks):
             with lock:
@@ -355,6 +366,7 @@ class PopulationHillClimber:
         if combined_mse <= min(parent_a_mse, parent_b_mse):
             with self._variant_locks[self.primary_index]:
                 primary.adopt_solution(combined, combined_canvas, combined_mse)
+            self.recombination_successes += 1
             return True
 
         return False
@@ -417,6 +429,9 @@ class PopulationHillClimber:
             ),
             primary_index=int(self.primary_index),
             best_index=int(best_idx),
+            recombination_successes=int(self.recombination_successes),
+            recombination_attempts=int(self.recombination_attempts),
+            diversity_observed=bool(self.non_primary_better_seen),
         )
 
     def get_error_maps(self, variant_index: int) -> dict[str, np.ndarray]:

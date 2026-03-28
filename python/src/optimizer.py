@@ -180,6 +180,7 @@ class HillClimbingOptimizer:
         size_multiplier: float = 1.0,
         random_placement_mode: bool = False,
         death_interval_iterations: int = 1000,
+        snapshot_iterations: set[int] | None = None,
     ) -> None:
         if max_iterations <= 0:
             raise ValueError("max_iterations must be positive.")
@@ -207,6 +208,12 @@ class HillClimbingOptimizer:
         self.size_multiplier = float(size_multiplier)
         self.random_placement_mode = bool(random_placement_mode)
         self.death_interval_iterations = int(death_interval_iterations)
+        if snapshot_iterations is None:
+            self.snapshot_iterations: set[int] = set()
+        else:
+            self.snapshot_iterations = {
+                int(i) for i in snapshot_iterations if int(i) > 0
+            }
 
         self.rng = np.random.default_rng(random_seed)
         if random_seed is not None:
@@ -249,6 +256,7 @@ class HillClimbingOptimizer:
         self.mse_history: list[float] = [self.current_mse]
         self.accepted_polygons: list[Polygon] = []
         self.snapshots: list[np.ndarray] = []
+        self.iteration_snapshots: dict[int, np.ndarray] = {}
 
         self.acceptance_window: deque[bool] = deque(maxlen=100)
         self.acceptance_history: list[bool] = []
@@ -789,6 +797,9 @@ class HillClimbingOptimizer:
             self.iteration,
         )
         self.mse_history.append(self.current_mse)
+
+        if self.iteration in self.snapshot_iterations:
+            self.iteration_snapshots[self.iteration] = np.array(self.canvas, copy=True)
 
         if self.iteration % self.snapshot_interval == 0:
             self.snapshots.append(np.array(self.canvas, copy=True))
