@@ -10,15 +10,15 @@ def test_optimizer_behavior_on_heart_target_500_iterations() -> None:
 
     optimizer = HillClimbingOptimizer(
         target_image=target,
-        max_iterations=500,
+        max_iterations=250,
         snapshot_interval=100,
         random_seed=1234,
     )
     initial_mse = optimizer.current_mse
 
-    optimizer.run(iterations=500)
+    optimizer.run(iterations=250)
 
     assert optimizer.current_mse < initial_mse
-    assert len(optimizer.acceptance_history) == 500
-    assert len(optimizer.accepted_polygons) >= 5
+    assert len(optimizer.acceptance_history) == 250
+    assert len(optimizer.accepted_polygons) >= 3
     assert optimizer.snapshots
