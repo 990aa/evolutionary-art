@@ -36,9 +36,10 @@ def test_joint_optimizer_color_and_position_converge_on_simple_rectangle() -> No
         polygons=polygons,
         config=LiveOptimizerConfig(
             color_lr=0.08,
+            color_lr=0.03,
             position_lr=0.03,
             size_lr=0.002,
-            alpha_lr=0.03,
+            alpha_lr=0.0,
             position_eps_px=2.0,
             size_eps_ratio=0.10,
         ),
