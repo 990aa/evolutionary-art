@@ -439,6 +439,7 @@ def execute_phase7_schedule(
     plan: Phase7Plan,
     random_seed: int,
     minutes: float,
+    hard_timeout_seconds: float | None,
     controls: Phase7ControlState,
     shared_update_callback,
     max_total_steps: int | None,
@@ -448,6 +449,29 @@ def execute_phase7_schedule(
 
     base_resolution = int(target_image.shape[0])
     deadline = time.monotonic() + max(0.0, float(minutes) * 60.0) if minutes > 0.0 else None
+    hard_deadline = (
+        time.monotonic() + float(hard_timeout_seconds)
+        if hard_timeout_seconds is not None and hard_timeout_seconds > 0.0
+        else None
+    )
+
+    def _deadline_reached() -> bool:
+        now = time.monotonic()
+        return bool(
+            (deadline is not None and now >= deadline)
+            or (hard_deadline is not None and now >= hard_deadline)
+        )
+
+    def _remaining_seconds() -> float | None:
+        now = time.monotonic()
+        candidates: list[float] = []
+        if deadline is not None:
+            candidates.append(float(deadline - now))
+        if hard_deadline is not None:
+            candidates.append(float(hard_deadline - now))
+        if not candidates:
+            return None
+        return float(min(candidates))
 
     rng = np.random.default_rng(random_seed)
     cfg = LiveOptimizerConfig(
@@ -474,7 +498,7 @@ def execute_phase7_schedule(
     for round_idx, round_cfg in enumerate(plan.rounds):
         if controls.quit_requested:
             break
-        if deadline is not None and time.monotonic() >= deadline:
+        if _deadline_reached():
             break
 
         target_level = _resize_rgb(target_image, round_cfg.resolution)
@@ -533,12 +557,15 @@ def execute_phase7_schedule(
         for batch_size in round_cfg.batch_schedule:
             if controls.quit_requested:
                 break
-            if deadline is not None and time.monotonic() >= deadline:
+            if _deadline_reached():
                 break
             if max_total_steps is not None and total_iteration_points >= max_total_steps:
                 break
 
             while controls.paused and not controls.quit_requested:
+                if _deadline_reached():
+                    controls.quit_requested = True
+                    break
                 time.sleep(0.05)
                 if controls.correction_requested:
                     apply_low_frequency_color_correction(
@@ -552,11 +579,40 @@ def execute_phase7_schedule(
             if controls.quit_requested:
                 break
 
+            if controls.correction_requested:
+                apply_low_frequency_color_correction(
+                    optimizer,
+                    sigma=10.0,
+                    strength=0.7,
+                    softness=max(0.2, round_cfg.end_softness * controls.softness_scale),
+                )
+                controls.correction_requested = False
+
             before_len = len(optimizer.loss_history)
             batch_markers.append(len(global_losses))
 
             force_growth = controls.force_growth_requested
             controls.force_growth_requested = False
+
+            max_steps_per_cycle = int(round_cfg.max_steps_per_cycle)
+            post_add_steps = int(round_cfg.post_add_steps)
+            remaining = _remaining_seconds()
+            if remaining is not None:
+                if remaining <= 0.0:
+                    break
+                throttle = float(np.clip(remaining / 12.0, 0.20, 1.0))
+                if not force_growth:
+                    max_steps_per_cycle = max(
+                        1,
+                        min(
+                            max_steps_per_cycle,
+                            int(np.ceil(max_steps_per_cycle * throttle)),
+                        ),
+                    )
+                post_add_steps = max(
+                    1,
+                    min(post_add_steps, int(np.ceil(post_add_steps * throttle))),
+                )
 
             start_soft = max(0.2, round_cfg.start_softness * controls.softness_scale)
             end_soft = max(0.15, round_cfg.end_softness * controls.softness_scale)
@@ -564,8 +620,8 @@ def execute_phase7_schedule(
             progressive_growth(
                 optimizer,
                 batch_schedule=[int(batch_size)],
-                max_steps_per_cycle=0 if force_growth else int(round_cfg.max_steps_per_cycle),
-                post_add_steps=int(round_cfg.post_add_steps),
+                max_steps_per_cycle=0 if force_growth else max_steps_per_cycle,
+                post_add_steps=post_add_steps,
                 convergence_window=80,
                 convergence_rel_threshold=0.001,
                 region_window=5,
@@ -605,10 +661,13 @@ def execute_phase7_schedule(
 
             full_canvas = _resize_rgb(optimizer.current_canvas, base_resolution)
             loss_value = float(np.mean((target_image - full_canvas) ** 2, dtype=np.float32))
+            remaining_for_status = _remaining_seconds()
+            remaining_text = "n/a" if remaining_for_status is None else f"{remaining_for_status:.1f}s"
 
             status = (
                 f"{round_cfg.name} | polygons={optimizer.polygons.count} | "
-                f"loss={loss_value:.6f} | softness={controls.softness_scale:.2f}"
+                f"loss={loss_value:.6f} | softness={controls.softness_scale:.2f} | "
+                f"remaining={remaining_text}"
             )
             shared_update_callback(
                 full_canvas,
@@ -631,7 +690,7 @@ def execute_phase7_schedule(
 
         if controls.quit_requested:
             break
-        if deadline is not None and time.monotonic() >= deadline:
+        if _deadline_reached():
             break
         if max_total_steps is not None and total_iteration_points >= max_total_steps:
             break
@@ -676,6 +735,7 @@ def run_phase7_headless(
     plan: Phase7Plan,
     random_seed: int,
     minutes: float,
+    hard_timeout_seconds: float | None = None,
     max_total_steps: int | None = None,
 ) -> Phase7ExecutionResult:
     controls = Phase7ControlState()
@@ -711,6 +771,7 @@ def run_phase7_headless(
         plan=plan,
         random_seed=random_seed,
         minutes=minutes,
+        hard_timeout_seconds=hard_timeout_seconds,
         controls=controls,
         shared_update_callback=_noop_update,
         max_total_steps=max_total_steps,
@@ -724,6 +785,7 @@ def run_phase7_live_display(
     plan: Phase7Plan,
     random_seed: int,
     minutes: float,
+    hard_timeout_seconds: float | None = None,
     update_interval_ms: int = 2000,
     close_after_seconds: float | None = None,
     max_total_steps: int | None = None,
@@ -807,6 +869,7 @@ def run_phase7_live_display(
             plan=plan,
             random_seed=random_seed,
             minutes=minutes,
+            hard_timeout_seconds=hard_timeout_seconds,
             controls=controls,
             shared_update_callback=_update_shared,
             max_total_steps=max_total_steps,

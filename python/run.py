@@ -33,6 +33,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Runtime budget in minutes.",
     )
     parser.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=None,
+        help="Hard safety timeout in seconds. Defaults to minutes*60 + 45.",
+    )
+    parser.add_argument(
         "--resolution",
         type=int,
         default=200,
@@ -169,6 +175,7 @@ def print_analysis(
     original_size: tuple[int, int],
     fit_mode: str,
     minutes: float,
+    hard_timeout_seconds: float | None,
     polygon_budget: int,
     plan,
     iter_rate: float | None,
@@ -191,6 +198,10 @@ def print_analysis(
         + ", ".join([f"{img.shape[1]}x{img.shape[0]}" for img in preprocessed.pyramid])
     )
     print(f"runtime_budget_minutes: {minutes:.2f}")
+    if hard_timeout_seconds is None:
+        print("hard_timeout_seconds: none")
+    else:
+        print(f"hard_timeout_seconds: {hard_timeout_seconds:.1f}")
 
     print("auto_rounds:")
     for round_cfg in plan.rounds:
@@ -242,6 +253,14 @@ def main() -> int:
         parser.error("--resolution must be positive")
     if args.minutes <= 0.0 and args.iterations is None:
         parser.error("Use --minutes > 0 or provide --iterations for a bounded run")
+    if args.timeout_seconds is not None and args.timeout_seconds <= 0.0:
+        parser.error("--timeout-seconds must be positive")
+
+    hard_timeout_seconds: float | None = (
+        float(args.timeout_seconds)
+        if args.timeout_seconds is not None
+        else (float(args.minutes) * 60.0 + 45.0 if args.minutes > 0.0 else None)
+    )
 
     preprocessed = preprocess_target_array(
         prepared_rgb,
@@ -273,6 +292,7 @@ def main() -> int:
         original_size=original_size,
         fit_mode=fit_mode,
         minutes=float(args.minutes),
+        hard_timeout_seconds=hard_timeout_seconds,
         polygon_budget=polygon_budget,
         plan=plan,
         iter_rate=iter_rate,
@@ -286,6 +306,7 @@ def main() -> int:
             plan=plan,
             random_seed=args.seed,
             minutes=float(args.minutes),
+            hard_timeout_seconds=hard_timeout_seconds,
             max_total_steps=args.iterations,
         )
     else:
@@ -299,6 +320,7 @@ def main() -> int:
             plan=plan,
             random_seed=args.seed,
             minutes=float(args.minutes),
+            hard_timeout_seconds=hard_timeout_seconds,
             update_interval_ms=args.update_interval_ms,
             close_after_seconds=args.close_after_seconds,
             max_total_steps=args.iterations,
