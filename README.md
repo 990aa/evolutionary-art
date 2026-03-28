@@ -16,10 +16,23 @@ Main implementation files:
 - [python/src/polygon.py](python/src/polygon.py): Shape dataclass/enum and candidate generation.
 - [python/src/renderer.py](python/src/renderer.py): Rasterization and alpha blending.
 - [python/src/preprocessing.py](python/src/preprocessing.py): Phase 1 preprocessing (4-level Gaussian pyramid, LAB k-means segmentation, Sobel structure map, complexity scoring, adaptive recommendations).
-- [python/src/optimizer.py](python/src/optimizer.py): Main hill-climbing loop with phase scheduling, multi-scale loss weighting, edge-aware guidance, and acceptance tracking.
+- [python/src/optimizer.py](python/src/optimizer.py): Main hill-climbing loop with phase scheduling, multi-scale perceptual LAB loss weighting, adaptive alpha selection, edge-aware shape strategy, splitting, palette refinement, and polygon death/replacement maintenance.
 - [python/src/display.py](python/src/display.py): Four-panel live visualization with threaded optimizer/display separation.
 - [python/demo.py](python/demo.py): Multi-target batch runner, frame/GIF/grid/formula/stat generation.
 - [python/run.py](python/run.py): Custom-image entry point with preprocessing summary and live run launch.
+
+## Part 2 Features Implemented
+Phase 2 (Perceptual color matching):
+- Acceptance and optimization guidance use perceptual LAB-space error instead of RGB-only MSE.
+- Candidate color is segmentation-aware: cluster centroid in LAB plus local LAB patch blending.
+- Adaptive alpha selector evaluates low/medium/high alpha (0.15, 0.40, 0.70) and chooses the best candidate.
+- Palette refinement pass runs periodically to retune accepted polygon colors.
+
+Phase 3 (Advanced polygon strategies):
+- Content-aware shape selection uses structure map magnitude and phase context.
+- Edge regions use oriented geometry guided by local gradient direction.
+- Accepted polygons can be split into two smaller children when split candidates reduce loss.
+- Periodic polygon death/replacement maintenance removes weak contributors and proposes new candidates.
 
 ## Targets
 Targets are in [python/targets](python/targets):
@@ -55,6 +68,13 @@ Run algorithm tests:
 ```powershell
 Set-Location python
 uv run python -m pytest tests/test_mse.py tests/test_renderer.py tests/test_optimizer.py -v
+```
+
+Run full test suite including Part 2 and Part 3 behavioral checks:
+
+```powershell
+Set-Location python
+uv run python -m pytest tests -v
 ```
 
 ## Run the Demo
