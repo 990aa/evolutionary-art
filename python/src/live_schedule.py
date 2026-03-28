@@ -462,6 +462,7 @@ def progressive_growth(
             continue
 
         loss_before_cycle = float(optimizer.loss_history[-1])
+        polygon_count_before_cycle = int(optimizer.polygons.count)
         best_cycle_loss = loss_before_cycle
         best_polygons = optimizer.polygons.copy()
 
@@ -678,6 +679,19 @@ def progressive_growth(
         while float(optimizer.loss_history[-1]) >= loss_before_cycle and recovery_steps < recovery_budget:
             optimizer.step(softness=end_softness)
             recovery_steps += 1
+
+        if (
+            float(optimizer.loss_history[-1]) >= loss_before_cycle
+            and optimizer.polygons.count > polygon_count_before_cycle
+        ):
+            optimizer.polygons.alphas[polygon_count_before_cycle:] = 0.0
+            _refresh_optimizer_canvas(optimizer, softness=end_softness)
+            apply_low_frequency_color_correction(
+                optimizer,
+                sigma=residual_sigma,
+                strength=max(0.2, low_frequency_correction_strength),
+                softness=end_softness,
+            )
 
         cycle_results.append(
             GrowthCycleResult(
