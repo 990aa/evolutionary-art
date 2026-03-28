@@ -1,35 +1,60 @@
 # Attention-Guided Evolutionary Art
 
 ## Overview
-This project reconstructs small RGB target images (100x100) using an evolutionary hill-climbing process that places semi-transparent geometric primitives (triangles, quadrilaterals, ellipses) one at a time.
+This project reconstructs RGB target images (default 200x200, optional 300x300) using an attention-guided evolutionary pipeline. The optimizer uses population-assisted hill climbing with perceptual LAB-space loss, adaptive alpha selection, and geometry strategies for edges, flat regions, and texture.
 
-The system is attention-guided: each proposal is sampled from a probability map derived from per-pixel error, so new shapes are preferentially proposed in poorly reconstructed regions.
+The live system is interactive and presentation-ready: segmentation overlays, error-map mode cycling, pause/resume, screenshot capture, clean shutdown, and population variant switching are all available during runtime.
 
 ## Core Python Pipeline
 Main implementation files:
 - [python/src/image_loader.py](python/src/image_loader.py): Loads and normalizes images to float32 [0,1].
 - [python/src/canvas.py](python/src/canvas.py): White-canvas initialization and copying.
-- [python/src/mse.py](python/src/mse.py): Scalar MSE, raw error map, Gaussian-smoothed probability map.
+- [python/src/mse.py](python/src/mse.py): RGB and perceptual LAB error metrics and error maps.
 - [python/src/polygon.py](python/src/polygon.py): Shape dataclass/enum and candidate generation.
 - [python/src/renderer.py](python/src/renderer.py): Rasterization and alpha blending.
-- [python/src/preprocessing.py](python/src/preprocessing.py): Phase 1 preprocessing (4-level Gaussian pyramid, LAB k-means segmentation, Sobel structure map, complexity scoring, adaptive recommendations).
-- [python/src/optimizer.py](python/src/optimizer.py): Main hill-climbing loop with phase scheduling, multi-scale perceptual LAB loss weighting, adaptive alpha selection, edge-aware shape strategy, splitting, palette refinement, and polygon death/replacement maintenance.
-- [python/src/display.py](python/src/display.py): Four-panel live visualization with threaded optimizer/display separation.
+- [python/src/preprocessing.py](python/src/preprocessing.py): Phase 1 preprocessing (4-level Gaussian pyramid, LAB MiniBatchKMeans segmentation, skimage Sobel structure+direction maps, complexity scoring, adaptive recommendations).
+- [python/src/optimizer.py](python/src/optimizer.py): Main hill-climbing loop with sigmoid multi-scale weighting, adaptive alpha selection, edge-aware shape strategy, splitting, palette refinement, and polygon death/replacement maintenance.
+- [python/src/population.py](python/src/population.py): 6-variant threaded population optimizer with barrier-synchronized recombination.
+- [python/src/display.py](python/src/display.py): Four-panel interactive live visualization for arbitrary images and population variants.
 - [python/demo.py](python/demo.py): Multi-target batch runner, frame/GIF/grid/formula/stat generation.
 - [python/run.py](python/run.py): Custom-image entry point with preprocessing summary and live run launch.
 
-## Part 2 Features Implemented
-Phase 2 (Perceptual color matching):
-- Acceptance and optimization guidance use perceptual LAB-space error instead of RGB-only MSE.
-- Candidate color is segmentation-aware: cluster centroid in LAB plus local LAB patch blending.
-- Adaptive alpha selector evaluates low/medium/high alpha (0.15, 0.40, 0.70) and chooses the best candidate.
-- Palette refinement pass runs periodically to retune accepted polygon colors.
+## Technical Decisions Applied
+- LAB conversion is implemented via scikit-image (`rgb2lab`, `lab2rgb`), not custom conversion.
+- Segmentation uses `MiniBatchKMeans` for speed on image-sized data.
+- Structure maps are computed with skimage Sobel filters.
+- Default resolution is 200x200; 300x300 is opt-in using `--resolution 300`.
+- Multi-scale coarse/fine blending uses sigmoid transition: fine weight = `sigmoid(8 * (i/max_iter - 0.4))`.
+- Palette refinement runs every 500 accepted polygons (not every fixed number of iterations).
+- Population phase uses 6 variants on 6 worker threads.
 
-Phase 3 (Advanced polygon strategies):
-- Content-aware shape selection uses structure map magnitude and phase context.
-- Edge regions use oriented geometry guided by local gradient direction.
-- Accepted polygons can be split into two smaller children when split candidates reduce loss.
-- Periodic polygon death/replacement maintenance removes weak contributors and proposes new candidates.
+## Part 2-5 Features Implemented
+Phase 2 (Perceptual color matching):
+- LAB-space acceptance and guidance metrics.
+- Segmentation-aware LAB color sampling with centroid+local blending.
+- Adaptive alpha selector over {0.15, 0.40, 0.70}.
+- Palette refinement pass every 500 accepted polygons.
+
+Phase 3 (Detail capture strategies):
+- Content-aware shape selection from structure magnitude and phase.
+- Edge-oriented geometry from local Sobel direction.
+- Optional polygon splitting in non-coarse phases.
+- Polygon death/replacement maintenance for sparse contribution.
+
+Phase 4 (Population-assisted hill climbing):
+- 6 optimizer variants run concurrently on 6 threads.
+- Variant personalities (edge emphasis, flat bias, size scaling, aggressive maintenance).
+- Barrier-synchronized recombination every 500 iterations.
+- Greedy polygon-level parent recombination promotes better primary states.
+
+Phase 5 (Extended live visualization):
+- Arbitrary image input flow with crop/letterbox fitting.
+- Segmentation overlay toggle on target panel (`S`).
+- Error-map mode cycle (`E`): RGB MSE, structure-weighted, perceptual LAB.
+- Accept/reject flash bar on evolving canvas.
+- Dual MSE lines (primary and best variant) plus acceptance-rate axis.
+- ETA-to-target-MSE estimate and continuous stats update.
+- Interactive controls: `P`, `S`, `E`, `R`, `Q`, `1/2/3`.
 
 ## Targets
 Targets are in [python/targets](python/targets):
@@ -106,6 +131,17 @@ Set-Location python
 uv run python run.py .\targets\face.png
 ```
 
+Default uses 200x200 preprocessing. For 300x300 opt-in:
+
+```powershell
+uv run python run.py .\targets\face.png --resolution 300
+```
+
+Fit-mode behavior for non-square images:
+- `--fit-mode auto` (default): prompts crop vs letterbox when interactive; falls back to crop if non-interactive.
+- `--fit-mode crop`: center-crop then resize.
+- `--fit-mode letterbox`: preserve aspect ratio with padding.
+
 You will see a startup analysis summary (complexity score, recommended polygon budget, detected color regions), then a live window with:
 - target image
 - attention/error map
@@ -129,6 +165,9 @@ uv run python run.py .\targets\face.png --polygons 300
 
 # override coarse-phase max polygon size
 uv run python run.py .\targets\face.png --max-size 26
+
+# explicit fit mode and target convergence threshold
+uv run python run.py .\targets\face.png --fit-mode letterbox --target-mse 0.01
 ```
 
 Headless/check mode (no GUI window):

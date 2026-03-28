@@ -227,20 +227,36 @@ def run_live_display(
     ax_mse.set_yscale("log")
     ax_mse.grid(True, alpha=0.25)
 
-    (primary_line,) = ax_mse.plot([], [], color="tab:blue", linewidth=2.0, label="Primary")
-    (best_line,) = ax_mse.plot([], [], color="tab:green", linewidth=2.0, label="Best Variant")
+    (primary_line,) = ax_mse.plot(
+        [], [], color="tab:blue", linewidth=2.0, label="Primary"
+    )
+    (best_line,) = ax_mse.plot(
+        [], [], color="tab:green", linewidth=2.0, label="Best Variant"
+    )
 
     ax_acc.set_ylabel("Acceptance Rate (%)")
     ax_acc.set_ylim(0.0, 100.0)
-    (acc_line,) = ax_acc.plot([], [], color="tab:orange", alpha=0.65, linewidth=1.5, label="Acceptance %")
+    (acc_line,) = ax_acc.plot(
+        [], [], color="tab:orange", alpha=0.65, linewidth=1.5, label="Acceptance %"
+    )
 
     lines = [primary_line, best_line, acc_line]
     labels = [line.get_label() for line in lines]
     ax_mse.legend(lines, labels, loc="upper right")
 
     transition_a, transition_b = phase_transition_iterations(max_iterations)
-    ax_mse.axvline(transition_a // 500 if transition_a > 0 else 0, linestyle="--", color="gray", alpha=0.4)
-    ax_mse.axvline(transition_b // 500 if transition_b > 0 else 0, linestyle="--", color="gray", alpha=0.4)
+    ax_mse.axvline(
+        transition_a // 500 if transition_a > 0 else 0,
+        linestyle="--",
+        color="gray",
+        alpha=0.4,
+    )
+    ax_mse.axvline(
+        transition_b // 500 if transition_b > 0 else 0,
+        linestyle="--",
+        color="gray",
+        alpha=0.4,
+    )
 
     stop_event = threading.Event()
     progress_window: deque[tuple[int, float, float]] = deque(maxlen=600)
@@ -287,7 +303,12 @@ def run_live_display(
         timer.start()
 
     def update(_: int):
-        nonlocal flash_alpha, flash_color, last_seen_iteration, eta_seconds, capture_done
+        nonlocal \
+            flash_alpha, \
+            flash_color, \
+            last_seen_iteration, \
+            eta_seconds, \
+            capture_done
 
         if stop_event.is_set():
             anim.event_source.stop()
@@ -339,7 +360,9 @@ def run_live_display(
             ax_mse.set_xlim(0, max(10, primary_hist.size + 5))
 
             now = time.monotonic()
-            progress_window.append((snap.primary_iteration, now, float(primary_hist[-1])))
+            progress_window.append(
+                (snap.primary_iteration, now, float(primary_hist[-1]))
+            )
             if snap.primary_iteration % 100 == 0:
                 eta_seconds = _estimate_time_to_target(progress_window, target_mse)
 
@@ -373,7 +396,11 @@ def run_live_display(
             )
         )
 
-        if capture_iteration is not None and not capture_done and snap.primary_iteration >= capture_iteration:
+        if (
+            capture_iteration is not None
+            and not capture_done
+            and snap.primary_iteration >= capture_iteration
+        ):
             fig.savefig(capture_path, dpi=150, bbox_inches="tight")
             capture_done = True
 

@@ -119,16 +119,70 @@ def test_phase5_keyboard_controls_and_clean_q_shutdown() -> None:
         quit_called["value"] = True
         population.stop()
 
-    assert handle_control_key("p", ui=ui, population=population, screenshot_callback=shot, quit_callback=quit_now) == "pause"
+    assert (
+        handle_control_key(
+            "p",
+            ui=ui,
+            population=population,
+            screenshot_callback=shot,
+            quit_callback=quit_now,
+        )
+        == "pause"
+    )
     assert ui.paused
-    assert handle_control_key("s", ui=ui, population=population, screenshot_callback=shot, quit_callback=quit_now) == "segmentation-toggle"
+    assert (
+        handle_control_key(
+            "s",
+            ui=ui,
+            population=population,
+            screenshot_callback=shot,
+            quit_callback=quit_now,
+        )
+        == "segmentation-toggle"
+    )
     assert ui.show_segmentation_overlay
-    assert handle_control_key("e", ui=ui, population=population, screenshot_callback=shot, quit_callback=quit_now) == "error-mode-cycle"
-    assert handle_control_key("r", ui=ui, population=population, screenshot_callback=shot, quit_callback=quit_now) == "screenshot"
+    assert (
+        handle_control_key(
+            "e",
+            ui=ui,
+            population=population,
+            screenshot_callback=shot,
+            quit_callback=quit_now,
+        )
+        == "error-mode-cycle"
+    )
+    assert (
+        handle_control_key(
+            "r",
+            ui=ui,
+            population=population,
+            screenshot_callback=shot,
+            quit_callback=quit_now,
+        )
+        == "screenshot"
+    )
     assert screenshot_called["value"]
-    assert handle_control_key("2", ui=ui, population=population, screenshot_callback=shot, quit_callback=quit_now) == "variant-switch"
+    assert (
+        handle_control_key(
+            "2",
+            ui=ui,
+            population=population,
+            screenshot_callback=shot,
+            quit_callback=quit_now,
+        )
+        == "variant-switch"
+    )
     assert ui.display_variant_index == 1
-    assert handle_control_key("q", ui=ui, population=population, screenshot_callback=shot, quit_callback=quit_now) == "quit"
+    assert (
+        handle_control_key(
+            "q",
+            ui=ui,
+            population=population,
+            screenshot_callback=shot,
+            quit_callback=quit_now,
+        )
+        == "quit"
+    )
     assert ui.quit_requested
     assert quit_called["value"]
 

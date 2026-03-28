@@ -1,7 +1,7 @@
 # Attention-Guided Evolutionary Art: An Academic Report
 
 ## Abstract
-This report presents a compact evolutionary image reconstruction system that approximates 100x100 RGB targets using transparent geometric primitives. The optimization algorithm is a hill-climbing search guided by a smoothed per-pixel error map. Candidate shapes are sampled more often in high-error regions, rendered with alpha blending, and accepted only if they reduce global mean squared error (MSE). A deterministic shape cycle (triangle, quadrilateral, ellipse) and a three-phase size schedule provide stable convergence and visual variety. Experiments on three targets (heart, logo, face) show monotonic error reduction and interpretable intermediate states. The implementation emphasizes reproducibility, testing, and real-time visualization.
+This report presents a population-assisted evolutionary image reconstruction system that approximates RGB targets at default 200x200 resolution (with 300x300 opt-in) using transparent geometric primitives. Optimization is driven by perceptual LAB-space error, attention-guided proposal sampling, adaptive alpha selection, and phase-aware geometry strategies. A 6-variant threaded population explores complementary search behaviors and periodically recombines best-performing states. The interface provides a four-panel interactive visualization with segmentation and error-mode toggles, variant switching, and progress estimation. Experiments and tests show stable convergence, measurable improvement from population diversity, and interpretable intermediate states.
 
 ## 1. Introduction
 Generative approximation with simple primitives is a useful educational setting for optimization, rendering, and model interpretability. The system here is intentionally small but expressive:
@@ -34,10 +34,12 @@ The pipeline is modular and testable.
 Core modules:
 - `image_loader.py`: RGB conversion, resize, float32 normalization.
 - `canvas.py`: white-canvas initialization and deep copy.
-- `mse.py`: scalar MSE + raw/smoothed error maps.
-- `polygon.py`: shape sampling and informed color initialization.
+- `mse.py`: RGB and perceptual LAB metrics + error maps.
+- `polygon.py`: content-aware shape sampling and LAB-grounded color initialization.
 - `renderer.py`: rasterization and alpha compositing.
-- `optimizer.py`: hill-climbing loop, scheduling, acceptance statistics.
+- `optimizer.py`: perceptual hill-climbing loop, sigmoid multi-scale scheduling, adaptive alpha, splitting/refinement/death passes.
+- `population.py`: 6-thread variant population + barrier-synchronized recombination.
+- `display.py`: interactive four-panel runtime UI with keyboard controls.
 
 ## 4. Methodology
 ### 4.1 Candidate generation
@@ -48,8 +50,8 @@ Three shape types are supported:
 
 The shape center is sampled from the current normalized error distribution, concentrating proposals in unresolved regions.
 
-### 4.2 Color initialization
-For each proposal, color is initialized from the mean target color in the shape bounding box, then perturbed with Gaussian noise ($\sigma=0.15$) and clipped to $[0,1]$.
+### 4.2 Perceptual color initialization
+Target colors are modeled in LAB space using MiniBatchKMeans segmentation. For each proposal center, the corresponding cluster centroid is sampled with local LAB perturbation, then blended with local LAB patch statistics before converting back to RGB. This improves perceptual consistency in region-level color reconstruction.
 
 ### 4.3 Rendering model
 Rasterization produces binary masks; compositing uses alpha blending:
@@ -71,22 +73,27 @@ The hill-climbing loop follows:
 4. Accept candidate iff MSE strictly decreases.
 5. Track acceptance and snapshots.
 
+Adaptive alpha selection evaluates three candidate opacities per proposal (0.15, 0.40, 0.70) and picks the best perceptual-loss outcome.
+
 ## 5. Scheduling and Search Dynamics
-### 5.1 Three-phase size schedule
-For total iterations $N$:
-- Phase 1 (0–30%): size decays from 30 px to 15 px.
-- Phase 2 (30–70%): size decays from 15 px to 8 px.
-- Phase 3 (70–100%): size decays from 8 px to 3 px.
+### 5.1 Multi-scale weighting schedule
+The coarse/fine blend uses a sigmoid transition rather than linear interpolation:
 
-Linear interpolation within each phase ensures smooth transitions.
+$$
+w_{fine}(i) = \sigma\left(8\left(\frac{i}{N} - 0.4\right)\right), \quad
+w_{coarse}(i) = 1 - w_{fine}(i)
+$$
 
-### 5.2 Shape cycling
-Shape type is deterministic by iteration index modulo 3:
-- $k \bmod 3 = 0$: triangle
-- $k \bmod 3 = 1$: quadrilateral
-- $k \bmod 3 = 2$: ellipse
+This keeps coarse structure dominant early and transitions rapidly to detail optimization after roughly 40% progress.
 
-This guarantees early and persistent diversity.
+### 5.2 Geometry and maintenance strategies
+- Shape selection is content-aware (edge/flat/texture) using structure magnitude and orientation.
+- Accepted polygons may be split into child polygons in non-coarse phases when loss improves.
+- Palette refinement runs every 500 accepted polygons.
+- Polygon death/replacement removes low-contribution shapes on a configurable cadence.
+
+### 5.3 Population-assisted search
+A 6-variant threaded population runs in parallel with distinct personalities (edge emphasis, flat bias, size scaling, aggressive maintenance). Every 500 iterations, a barrier-synchronized recombination step greedily mixes polygon candidates from top variants and promotes improved combined states to the primary variant.
 
 ## 6. Verification and Testing
 Behavioral and unit tests verify correctness:
@@ -103,7 +110,7 @@ Behavioral and unit tests verify correctness:
   - minimum accepted proposals and non-empty snapshots
 
 ## 7. Experimental Results
-Full demo configuration: 5000 iterations per target.
+Full demo configuration: up to 5000 iterations per target with interactive population-assisted visualization.
 
 Observed best-run statistics:
 - Best target: heart
@@ -126,9 +133,9 @@ All runs produce final canvases, replay GIFs, and a comparison grid (`comparison
 - Fixed alpha range and fixed schedule may not be universally optimal.
 
 ### 8.3 Potential improvements
-- Multi-try acceptance per iteration (beam-style proposals).
-- Adaptive sigma and/or schedule conditioned on convergence slope.
-- Hybrid local refinement (small gradient-based color perturbation).
+- Dynamic population resizing based on observed diversity.
+- Stronger recombination operators with geometry-aware crossover.
+- Optional CIEDE2000 metric for stricter perceptual fidelity.
 
 ## 9. Conclusion
 The project demonstrates that a compact evolutionary search with error-guided attention can reconstruct images effectively while remaining interpretable and testable. The method provides a pedagogically useful bridge between classical optimization concepts and modern attention-based reasoning.

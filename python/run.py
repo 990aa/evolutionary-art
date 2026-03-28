@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import math
 import sys
 from pathlib import Path
 
@@ -92,9 +91,11 @@ def _resolve_fit_mode(
         return "crop"
 
     try:
-        choice = input(
-            "Fit image to square: [C]enter-crop (default) or [L]etterbox? "
-        ).strip().lower()
+        choice = (
+            input("Fit image to square: [C]enter-crop (default) or [L]etterbox? ")
+            .strip()
+            .lower()
+        )
     except EOFError:
         return "crop"
     if choice.startswith("l"):
@@ -152,16 +153,25 @@ def _estimate_runtime_seconds(
     iter_rate = base_rate_200 * resolution_penalty * complexity_penalty
 
     target_factor = max(0.5, min(2.0, (0.01 / max(target_mse, 1e-6)) ** 0.35))
-    expected_iters = (1200.0 + 2600.0 * complexity) * target_factor * (
-        resolution / 200.0
-    ) ** 2
+    expected_iters = (
+        (1200.0 + 2600.0 * complexity) * target_factor * (resolution / 200.0) ** 2
+    )
     usable_iters = min(float(max_iterations), expected_iters)
     eta_seconds = usable_iters / max(iter_rate, 1e-6)
 
     return float(iter_rate), float(eta_seconds)
 
 
-def print_analysis(preprocessed, *, original_size: tuple[int, int], fit_mode: str, iterations: int, target_mse: float, iter_rate: float | None, eta_seconds: float | None) -> None:
+def print_analysis(
+    preprocessed,
+    *,
+    original_size: tuple[int, int],
+    fit_mode: str,
+    iterations: int,
+    target_mse: float,
+    iter_rate: float | None,
+    eta_seconds: float | None,
+) -> None:
     h, w, _ = preprocessed.target_rgb.shape
     unique_regions = int(np.unique(preprocessed.segmentation_map).size)
 
@@ -251,7 +261,9 @@ def main() -> int:
         return 0
 
     print("Launching population-assisted live visualization window...")
-    print("Controls: P pause/resume, S segmentation overlay, E error mode, R screenshot, Q quit, 1/2/3 variant view")
+    print(
+        "Controls: P pause/resume, S segmentation overlay, E error mode, R screenshot, Q quit, 1/2/3 variant view"
+    )
 
     run_live_display(
         target_image=preprocessed.target_rgb,

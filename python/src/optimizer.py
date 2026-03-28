@@ -812,7 +812,9 @@ class HillClimbingOptimizer:
         self.accepted_polygons = list(polygons)
         self.canvas = np.array(canvas, copy=True).astype(np.float32, copy=False)
         self.current_mse = float(mse_value)
-        self.current_error_map = self._compute_guided_error_map(self.canvas, self.iteration)
+        self.current_error_map = self._compute_guided_error_map(
+            self.canvas, self.iteration
+        )
         self.mse_history.append(self.current_mse)
 
 

@@ -32,7 +32,9 @@ def default_variant_personalities() -> list[VariantPersonality]:
         VariantPersonality(name="flat-bias", structure_bias_mode="flat"),
         VariantPersonality(name="large-polygons", size_multiplier=1.5),
         VariantPersonality(name="small-polygons", size_multiplier=0.5),
-        VariantPersonality(name="aggressive-maintenance", death_interval_iterations=200),
+        VariantPersonality(
+            name="aggressive-maintenance", death_interval_iterations=200
+        ),
     ]
 
 
@@ -127,10 +129,14 @@ class PopulationHillClimber:
         self.display_variant_index = 0
 
         self.segmentation_map = (
-            None if segmentation_map is None else segmentation_map.astype(np.int32, copy=False)
+            None
+            if segmentation_map is None
+            else segmentation_map.astype(np.int32, copy=False)
         )
         self.structure_map = (
-            None if structure_map is None else structure_map.astype(np.float32, copy=False)
+            None
+            if structure_map is None
+            else structure_map.astype(np.float32, copy=False)
         )
 
         self.primary_mse_history: list[float] = []
@@ -206,13 +212,21 @@ class PopulationHillClimber:
         optimizer = self.optimizers[variant_index]
         lock = self._variant_locks[variant_index]
 
-        while not self._stop_event.is_set() and optimizer.iteration < self.max_iterations:
+        while (
+            not self._stop_event.is_set() and optimizer.iteration < self.max_iterations
+        ):
             while self.paused and not self._stop_event.is_set():
                 time.sleep(0.01)
 
             with lock:
                 accepted = optimizer.step()
                 self._last_step_accepted[variant_index] = bool(accepted)
+
+            if variant_index != self.primary_index:
+                with self._variant_locks[self.primary_index]:
+                    primary_mse = float(self.optimizers[self.primary_index].current_mse)
+                if float(optimizer.current_mse) < primary_mse:
+                    self.non_primary_better_seen = True
 
             if (
                 optimizer.iteration > 0
@@ -325,7 +339,11 @@ class PopulationHillClimber:
             combined.append(poly_a if loss_a <= loss_b else poly_b)
 
         if pair_count < len(parent_a_polys) or pair_count < len(parent_b_polys):
-            remainder = parent_a_polys[pair_count:] if parent_a_mse <= parent_b_mse else parent_b_polys[pair_count:]
+            remainder = (
+                parent_a_polys[pair_count:]
+                if parent_a_mse <= parent_b_mse
+                else parent_b_polys[pair_count:]
+            )
             combined.extend(remainder)
 
         primary = self.optimizers[self.primary_index]
@@ -386,10 +404,14 @@ class PopulationHillClimber:
             running=self.running,
             last_step_accepted=bool(self._last_step_accepted[display_idx]),
             segmentation_map=(
-                None if self.segmentation_map is None else np.array(self.segmentation_map, copy=True)
+                None
+                if self.segmentation_map is None
+                else np.array(self.segmentation_map, copy=True)
             ),
             structure_map=(
-                None if self.structure_map is None else np.array(self.structure_map, copy=True)
+                None
+                if self.structure_map is None
+                else np.array(self.structure_map, copy=True)
             ),
             primary_index=int(self.primary_index),
             best_index=int(best_idx),

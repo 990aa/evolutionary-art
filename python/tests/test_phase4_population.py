@@ -33,7 +33,9 @@ def test_population_diversity_beats_primary_somewhere() -> None:
     target = np.zeros((h, w, 3), dtype=np.float32)
     target[..., 0] = xx
     target[..., 1] = 0.5 * yy + 0.25 * np.sin(xx * 8.0)
-    target[..., 2] = np.where((np.floor(xx * 12) + np.floor(yy * 12)) % 2 == 0, 0.85, 0.15)
+    target[..., 2] = np.where(
+        (np.floor(xx * 12) + np.floor(yy * 12)) % 2 == 0, 0.85, 0.15
+    )
     target = np.clip(target, 0.0, 1.0)
 
     prep = preprocess_target_array(target, random_seed=11, base_resolution=120)
