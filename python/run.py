@@ -17,7 +17,7 @@ from src.preprocessing import preprocess_target_array
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Phase 7 live evolutionary visualization for arbitrary images."
+        description="Single-optimizer staged reconstruction (A-B-C-D) for arbitrary images."
     )
     parser.add_argument("image_path", type=Path, help="Path to an input image.")
     parser.add_argument(
@@ -64,7 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--update-interval-ms",
         type=int,
-        default=2000,
+        default=5000,
         help="Display refresh interval in milliseconds.",
     )
     parser.add_argument(
@@ -312,9 +312,9 @@ def main() -> int:
             max_total_steps=args.iterations,
         )
     else:
-        print("Launching Phase 7 five-panel live visualization...")
+        print("Launching staged single-optimizer live visualization...")
         print(
-            "Controls: P pause, S segmentation, E residual mode, R screenshot, Q quit, 1/2/3 or V view, G force growth, D decomposition pass, +/- softness"
+            "Controls: P pause, R screenshot, Q quit"
         )
         result = run_phase7_live_display(
             target_image=preprocessed.target_rgb,
