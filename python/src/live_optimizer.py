@@ -374,7 +374,6 @@ class LiveJointOptimizer:
             softness=softness,
             chunk_size=self.config.render_chunk_size,
         )
-        previous_loss = self._loss(render.canvas)
         baseline_loss = float(self.loss_history[-1])
 
         grad_color = self._color_gradient(render)

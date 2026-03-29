@@ -11,7 +11,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.live_phase7 import Phase7ControlState, build_phase7_plan, execute_phase7_schedule
+from src.live_phase7 import (
+    Phase7ControlState,
+    build_phase7_plan,
+    execute_phase7_schedule,
+)
 from src.preprocessing import preprocess_target_array
 
 

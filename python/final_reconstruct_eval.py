@@ -40,7 +40,9 @@ def prepare_square_image(image_path: Path, resolution: int) -> np.ndarray:
         top = (h - side) // 2
         cropped = rgb.crop((left, top, left + side, top + side))
         resized = cropped.resize((resolution, resolution), Image.Resampling.LANCZOS)
-    return (np.asarray(resized, dtype=np.float32) / 255.0).astype(np.float32, copy=False)
+    return (np.asarray(resized, dtype=np.float32) / 255.0).astype(
+        np.float32, copy=False
+    )
 
 
 def save_rgb_image(path: Path, image: np.ndarray) -> None:
@@ -55,13 +57,17 @@ def absolute_error_map(target: np.ndarray, recon: np.ndarray) -> np.ndarray:
     return np.repeat(norm[:, :, None], 3, axis=2).astype(np.float32, copy=False)
 
 
-def compute_metrics(target: np.ndarray, recon: np.ndarray) -> tuple[float, float, float, float, float, float]:
+def compute_metrics(
+    target: np.ndarray, recon: np.ndarray
+) -> tuple[float, float, float, float, float, float]:
     mse = float(np.mean((target - recon) ** 2, dtype=np.float32))
     rmse = float(np.sqrt(max(mse, 0.0)))
     psnr = float(10.0 * np.log10(1.0 / max(mse, 1e-12)))
     ssim = float(structural_similarity(target, recon, channel_axis=2, data_range=1.0))
     accuracy = float(max(0.0, min(1.0, 1.0 - mse)) * 100.0)
-    pixel_match = float(np.mean(np.abs(target - recon) <= 0.05, dtype=np.float32) * 100.0)
+    pixel_match = float(
+        np.mean(np.abs(target - recon) <= 0.05, dtype=np.float32) * 100.0
+    )
     return mse, rmse, psnr, ssim, accuracy, pixel_match
 
 
@@ -111,7 +117,9 @@ def main() -> int:
         )
 
         recon = np.clip(result.final_canvas, 0.0, 1.0).astype(np.float32, copy=False)
-        target = np.clip(preprocessed.target_rgb, 0.0, 1.0).astype(np.float32, copy=False)
+        target = np.clip(preprocessed.target_rgb, 0.0, 1.0).astype(
+            np.float32, copy=False
+        )
 
         mse, rmse, psnr, ssim, accuracy, pixel_match = compute_metrics(target, recon)
         abs_err = absolute_error_map(target, recon)
@@ -139,9 +147,15 @@ def main() -> int:
                 ssim=ssim,
                 accuracy_percent=accuracy,
                 pixel_match_5pct=pixel_match,
-                target_file=str(target_file.relative_to(project_root)).replace("\\", "/"),
-                reconstruction_file=str(recon_file.relative_to(project_root)).replace("\\", "/"),
-                abs_error_file=str(err_file.relative_to(project_root)).replace("\\", "/"),
+                target_file=str(target_file.relative_to(project_root)).replace(
+                    "\\", "/"
+                ),
+                reconstruction_file=str(recon_file.relative_to(project_root)).replace(
+                    "\\", "/"
+                ),
+                abs_error_file=str(err_file.relative_to(project_root)).replace(
+                    "\\", "/"
+                ),
             )
         )
 
