@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import threading
-import textwrap
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import matplotlib
@@ -19,63 +18,28 @@ except Exception:
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.animation import FuncAnimation
-from PIL import Image, ImageDraw
+from PIL import Image
+from scipy.ndimage import gaussian_filter
 
 from src.live_optimizer import LiveJointOptimizer, LiveOptimizerConfig
-from src.live_renderer import (
-    SHAPE_ANNULAR_SEGMENT,
-    SHAPE_BEZIER_PATCH,
-    SHAPE_ELLIPSE,
-    SHAPE_QUAD,
-    SHAPE_THIN_STROKE,
-    SHAPE_TRIANGLE,
-    LivePolygonBatch,
-    SoftRasterizer,
-)
-from src.live_schedule import (
-    apply_low_frequency_color_correction,
-    make_random_live_batch_with_bounds,
-    progressive_growth,
-)
-
-
-_TRIANGLE_LOCAL = np.array(
-    [
-        [1.0, 0.0],
-        [-0.5, 0.8660254],
-        [-0.5, -0.8660254],
-    ],
-    dtype=np.float32,
-)
-
-_QUAD_LOCAL = np.array(
-    [
-        [1.0, 1.0],
-        [1.0, -1.0],
-        [-1.0, -1.0],
-        [-1.0, 1.0],
-    ],
-    dtype=np.float32,
-)
-
-
-@dataclass(frozen=True)
-class Phase7RoundConfig:
-    name: str
-    resolution: int
-    batch_schedule: list[int]
-    min_size: float
-    max_size: float
-    max_steps_per_cycle: int
-    post_add_steps: int
-    start_softness: float
-    end_softness: float
+from src.live_renderer import SHAPE_ELLIPSE, LivePolygonBatch, SoftRasterizer
 
 
 @dataclass(frozen=True)
 class Phase7Plan:
-    rounds: list[Phase7RoundConfig]
-    polygon_budget: int
+    stage_a_initial_polygons: int
+    stage_a_steps: int
+    stage_b_batches: int
+    stage_b_batch_size: int
+    stage_b_steps_per_batch: int
+    stage_b_size_start: float
+    stage_b_size_end: float
+    stage_c_batches: int
+    stage_c_batch_size: int
+    stage_c_steps_per_batch: int
+    stage_c_size_start: float
+    stage_c_size_end: float
+    stage_d_steps: int
 
 
 @dataclass(frozen=True)
@@ -87,70 +51,131 @@ class Phase7ExecutionResult:
     loss_history: list[float]
     resolution_markers: list[int]
     batch_markers: list[int]
+    stage_markers: list[tuple[str, int]]
 
 
 @dataclass
 class Phase7ControlState:
     paused: bool = False
     quit_requested: bool = False
-    show_segmentation_overlay: bool = False
-    view_mode: int = 0
-    residual_mode: int = 0
-    force_growth_requested: bool = False
-    correction_requested: bool = False
-    softness_scale: float = 1.0
 
 
 @dataclass
 class _SharedViewState:
     target: np.ndarray
-    segmentation_map: np.ndarray | None
     canvas: np.ndarray
     signed_residual: np.ndarray
-    abs_residual: np.ndarray
-    mse_residual: np.ndarray
-    polygon_preview: np.ndarray
     loss_history: list[float]
-    resolution_markers: list[int]
-    batch_markers: list[int]
-    round_name: str
-    current_resolution: int
+    stage_markers: list[tuple[str, int]]
     polygon_count: int
     iteration: int
+    stage_name: str
     running: bool
     status_line: str
+    polygon_sizes: np.ndarray
 
 
-def _resize_rgb(image: np.ndarray, resolution: int) -> np.ndarray:
-    clipped = np.clip(image.astype(np.float32, copy=False), 0.0, 1.0)
-    pil = Image.fromarray(np.round(clipped * 255.0).astype(np.uint8), mode="RGB")
-    out = pil.resize((resolution, resolution), Image.Resampling.LANCZOS)
-    return (np.asarray(out, dtype=np.float32) / 255.0).astype(np.float32, copy=False)
-
-
-def _scale_polygons(
-    polygons: LivePolygonBatch,
+def build_phase7_plan(
     *,
-    old_resolution: int,
-    new_resolution: int,
+    base_resolution: int,
+    polygon_budget: int,
+    complexity_score: float,
+) -> Phase7Plan:
+    del base_resolution
+    del complexity_score
+
+    budget = max(120, int(polygon_budget))
+    scale = float(np.clip(budget / 240.0, 0.7, 3.0))
+
+    a_count = int(round(40 * min(scale, 1.5)))
+    b_total = int(round(80 * scale))
+    c_total = max(40, budget - a_count - b_total)
+
+    b_batches = 8
+    c_batches = 12
+
+    return Phase7Plan(
+        stage_a_initial_polygons=max(20, a_count),
+        stage_a_steps=500,
+        stage_b_batches=b_batches,
+        stage_b_batch_size=max(1, int(np.ceil(b_total / b_batches))),
+        stage_b_steps_per_batch=200,
+        stage_b_size_start=25.0,
+        stage_b_size_end=10.0,
+        stage_c_batches=c_batches,
+        stage_c_batch_size=max(1, int(np.ceil(c_total / c_batches))),
+        stage_c_steps_per_batch=50,
+        stage_c_size_start=10.0,
+        stage_c_size_end=5.0,
+        stage_d_steps=1000,
+    )
+
+
+def _rgb_mse(a: np.ndarray, b: np.ndarray) -> float:
+    return float(np.mean((a - b) ** 2, dtype=np.float32))
+
+
+def _signed_residual(target: np.ndarray, canvas: np.ndarray) -> np.ndarray:
+    scalar = np.mean(target - canvas, axis=2, dtype=np.float32)
+    return np.clip(scalar, -1.0, 1.0).astype(np.float32, copy=False)
+
+
+def _region_mean_color(
+    target: np.ndarray,
+    cx: int,
+    cy: int,
+    radius: int,
+) -> tuple[float, float, float]:
+    h, w = target.shape[:2]
+    x0 = max(0, int(cx - radius))
+    x1 = min(w, int(cx + radius + 1))
+    y0 = max(0, int(cy - radius))
+    y1 = min(h, int(cy + radius + 1))
+    patch = target[y0:y1, x0:x1]
+    if patch.size == 0:
+        px = target[cy, cx]
+        return (float(px[0]), float(px[1]), float(px[2]))
+    avg = patch.mean(axis=(0, 1), dtype=np.float32)
+    return (float(avg[0]), float(avg[1]), float(avg[2]))
+
+
+def _grid_initialized_batch(
+    target: np.ndarray,
+    *,
+    count: int,
+    alpha: float,
 ) -> LivePolygonBatch:
-    scale = float(new_resolution) / max(float(old_resolution), 1.0)
-    centers = np.array(polygons.centers, copy=True)
-    sizes = np.array(polygons.sizes, copy=True)
-    rotations = np.array(polygons.rotations, copy=True)
-    colors = np.array(polygons.colors, copy=True)
-    alphas = np.array(polygons.alphas, copy=True)
-    shape_types = np.array(polygons.shape_types, copy=True)
-    shape_params = np.array(polygons.shape_params, copy=True)
+    h, w = target.shape[:2]
+    cols = int(np.ceil(np.sqrt(count * w / max(h, 1))))
+    rows = int(np.ceil(count / max(cols, 1)))
 
-    centers *= scale
-    centers[:, 0] = np.clip(centers[:, 0], 0.0, new_resolution - 1.0)
-    centers[:, 1] = np.clip(centers[:, 1], 0.0, new_resolution - 1.0)
-    sizes *= scale
+    base_size = float((w / np.sqrt(max(count, 1))) * 1.5)
 
-    stroke_idx = np.where(shape_types == SHAPE_THIN_STROKE)[0]
-    if stroke_idx.size > 0:
-        shape_params[stroke_idx, :3] *= scale
+    centers = np.zeros((count, 2), dtype=np.float32)
+    sizes = np.zeros((count, 2), dtype=np.float32)
+    rotations = np.zeros((count,), dtype=np.float32)
+    colors = np.zeros((count, 3), dtype=np.float32)
+    alphas = np.full((count,), float(alpha), dtype=np.float32)
+    shape_types = np.full((count,), SHAPE_ELLIPSE, dtype=np.int32)
+    shape_params = np.zeros((count, 6), dtype=np.float32)
+
+    idx = 0
+    for r in range(rows):
+        for c in range(cols):
+            if idx >= count:
+                break
+            x0 = int(np.floor(c * w / cols))
+            x1 = int(np.floor((c + 1) * w / cols))
+            y0 = int(np.floor(r * h / rows))
+            y1 = int(np.floor((r + 1) * h / rows))
+
+            cx = int(np.clip((x0 + x1) // 2, 0, w - 1))
+            cy = int(np.clip((y0 + y1) // 2, 0, h - 1))
+
+            centers[idx] = np.array([cx, cy], dtype=np.float32)
+            sizes[idx] = np.array([base_size, base_size], dtype=np.float32)
+            colors[idx] = np.array(_region_mean_color(target, cx, cy, max(2, base_size // 2)), dtype=np.float32)
+            idx += 1
 
     return LivePolygonBatch(
         centers=centers,
@@ -163,263 +188,66 @@ def _scale_polygons(
     )
 
 
-def _build_batch_schedule(total: int, typical_batch: int) -> list[int]:
-    total_left = max(0, int(total))
-    batch = max(1, int(typical_batch))
-    schedule: list[int] = []
-    while total_left > 0:
-        take = min(batch, total_left)
-        schedule.append(int(take))
-        total_left -= take
-    return schedule
+def _top_error_centers(error_map: np.ndarray, *, k: int, radius: int) -> list[tuple[int, int]]:
+    work = np.array(error_map, copy=True)
+    h, w = work.shape
+    centers: list[tuple[int, int]] = []
+
+    for _ in range(max(0, int(k))):
+        flat_idx = int(np.argmax(work))
+        y, x = divmod(flat_idx, w)
+        if work[y, x] <= 1e-12:
+            break
+        centers.append((x, y))
+
+        x0 = max(0, x - radius)
+        x1 = min(w, x + radius + 1)
+        y0 = max(0, y - radius)
+        y1 = min(h, y + radius + 1)
+        work[y0:y1, x0:x1] = 0.0
+
+    return centers
 
 
-def _allocate_counts(total: int, fractions: list[float]) -> list[int]:
-    if total <= 0:
-        return [0 for _ in fractions]
-
-    frac = np.asarray(fractions, dtype=np.float64)
-    frac = frac / max(np.sum(frac), 1e-9)
-    raw = frac * float(total)
-    base = np.floor(raw).astype(np.int32)
-    rem = int(total - int(np.sum(base)))
-
-    if rem > 0:
-        order = np.argsort(-(raw - base))
-        for i in range(rem):
-            base[int(order[i % len(order)])] += 1
-
-    return [int(v) for v in base.tolist()]
-
-
-def build_phase7_plan(
-    *,
-    base_resolution: int,
-    polygon_budget: int,
-    complexity_score: float,
-) -> Phase7Plan:
-    complexity = float(np.clip(complexity_score, 0.0, 1.0))
-    budget = max(1, int(polygon_budget))
-
-    levels = [
-        max(40, int(round(base_resolution * 0.25))),
-        max(64, int(round(base_resolution * 0.5))),
-        int(base_resolution),
-    ]
-    unique_levels: list[int] = []
-    for level in levels:
-        if not unique_levels or level != unique_levels[-1]:
-            unique_levels.append(level)
-
-    if len(unique_levels) == 1:
-        unique_levels = [max(40, unique_levels[0] // 2), unique_levels[0]]
-
-    if len(unique_levels) == 2:
-        fractions = [0.38, 0.62]
-    else:
-        fractions = [0.22, 0.33, 0.45]
-
-    counts = _allocate_counts(budget, fractions)
-
-    rounds: list[Phase7RoundConfig] = []
-    for idx, (resolution, count) in enumerate(zip(unique_levels, counts, strict=False)):
-        resolution_scale = (200.0 / max(float(resolution), 1.0)) ** 2
-        step_scale = float(np.clip(resolution_scale**0.6, 0.20, 1.20))
-
-        typical_batch = int(
-            np.clip(round((10.0 - 4.0 * complexity) * (1.0 + 0.15 * idx)), 2, 24)
-        )
-        schedule = _build_batch_schedule(count, typical_batch)
-
-        max_size = max(
-            4.0, float(resolution) * (0.22 - 0.07 * complexity) * (0.90**idx)
-        )
-        min_size = max(1.2, max_size * (0.20 + 0.06 * idx))
-
-        rounds.append(
-            Phase7RoundConfig(
-                name=f"round-{idx + 1}-{resolution}",
-                resolution=int(resolution),
-                batch_schedule=schedule,
-                min_size=float(min_size),
-                max_size=float(max_size),
-                max_steps_per_cycle=int(
-                    np.clip(
-                        round((18.0 + 34.0 * complexity - 2.0 * idx) * step_scale),
-                        3,
-                        48,
-                    )
-                ),
-                post_add_steps=int(
-                    np.clip(round((4.0 + 8.0 * complexity) * step_scale), 1, 14)
-                ),
-                start_softness=float(max(0.7, 2.2 - 0.35 * idx)),
-                end_softness=float(max(0.25, 0.70 - 0.10 * idx)),
-            )
-        )
-
-    return Phase7Plan(rounds=rounds, polygon_budget=budget)
-
-
-def _signed_residual_rgb(target: np.ndarray, canvas: np.ndarray) -> np.ndarray:
-    residual = np.mean(target - canvas, axis=2, dtype=np.float32)
-    denom = float(np.quantile(np.abs(residual), 0.98))
-    scale = max(denom, 1e-5)
-    norm = np.clip(residual / scale, -1.0, 1.0)
-
-    out = np.zeros_like(target, dtype=np.float32)
-    out[..., 0] = np.clip(norm, 0.0, 1.0)
-    out[..., 2] = np.clip(-norm, 0.0, 1.0)
-    return out
-
-
-def _absolute_residual_rgb(target: np.ndarray, canvas: np.ndarray) -> np.ndarray:
+def _high_frequency_error_map(target: np.ndarray, canvas: np.ndarray) -> np.ndarray:
     residual = np.mean(np.abs(target - canvas), axis=2, dtype=np.float32)
-    denom = float(np.quantile(residual, 0.98))
-    scale = max(denom, 1e-5)
-    norm = np.clip(residual / scale, 0.0, 1.0)
-    return np.repeat(norm[:, :, None], 3, axis=2).astype(np.float32, copy=False)
+    smooth = gaussian_filter(residual, sigma=3.0, mode="reflect")
+    hf = np.clip(residual - smooth, 0.0, None)
+    return gaussian_filter(hf, sigma=1.0, mode="reflect").astype(np.float32, copy=False)
 
 
-def _mse_residual_rgb(target: np.ndarray, canvas: np.ndarray) -> np.ndarray:
-    residual = np.mean((target - canvas) ** 2, axis=2, dtype=np.float32)
-    denom = float(np.quantile(residual, 0.98))
-    scale = max(denom, 1e-5)
-    norm = np.clip(residual / scale, 0.0, 1.0)
-
-    out = np.zeros_like(target, dtype=np.float32)
-    out[..., 0] = norm
-    out[..., 1] = np.clip(norm * 0.75, 0.0, 1.0)
-    return out
-
-
-def _local_polygon_points(
-    shape_type: int,
+def _add_targeted_batch(
+    optimizer: LiveJointOptimizer,
     *,
-    center_x: float,
-    center_y: float,
-    size_x: float,
-    size_y: float,
-    rotation: float,
-) -> np.ndarray:
-    if shape_type == SHAPE_TRIANGLE:
-        base = _TRIANGLE_LOCAL
+    target: np.ndarray,
+    batch_size: int,
+    size_px: float,
+    alpha: float,
+    high_frequency: bool,
+) -> None:
+    if batch_size <= 0:
+        return
+
+    if high_frequency:
+        err = _high_frequency_error_map(target, optimizer.current_canvas)
     else:
-        base = _QUAD_LOCAL
+        err = np.mean((target - optimizer.current_canvas) ** 2, axis=2, dtype=np.float32)
 
-    local = np.array(base, copy=True)
-    local[:, 0] *= float(size_x)
-    local[:, 1] *= float(size_y)
+    radius = max(2, int(round(size_px * 0.8)))
+    centers = _top_error_centers(err, k=batch_size, radius=radius)
 
-    c = float(np.cos(rotation))
-    s = float(np.sin(rotation))
-    x = local[:, 0] * c - local[:, 1] * s + float(center_x)
-    y = local[:, 0] * s + local[:, 1] * c + float(center_y)
-    return np.column_stack([x, y]).astype(np.float32)
-
-
-def _outline_palette_for_sizes(sizes: np.ndarray) -> list[tuple[int, int, int]]:
-    if sizes.size == 0:
-        return []
-    q1 = float(np.quantile(sizes, 0.33))
-    q2 = float(np.quantile(sizes, 0.66))
-
-    colors: list[tuple[int, int, int]] = []
-    for value in sizes:
-        if value >= q2:
-            colors.append((40, 120, 240))
-        elif value >= q1:
-            colors.append((40, 170, 70))
-        else:
-            colors.append((220, 60, 50))
-    return colors
-
-
-def make_polygon_outline_preview(
-    polygons: LivePolygonBatch,
-    *,
-    polygon_resolution: int,
-    output_resolution: int,
-) -> np.ndarray:
-    canvas = Image.new(
-        "RGB", (output_resolution, output_resolution), color=(255, 255, 255)
-    )
-    draw = ImageDraw.Draw(canvas)
-
-    if polygons.count == 0:
-        return (np.asarray(canvas, dtype=np.float32) / 255.0).astype(
-            np.float32, copy=False
+    for cx, cy in centers:
+        color_hint = _region_mean_color(target, cx, cy, max(2, int(round(size_px * 0.6))))
+        optimizer.add_polygon(
+            center_x=float(cx),
+            center_y=float(cy),
+            size_x=float(size_px),
+            size_y=float(size_px),
+            color=color_hint,
+            alpha=float(alpha),
+            shape_type=SHAPE_ELLIPSE,
+            rotation=0.0,
         )
-
-    scale = float(output_resolution) / max(float(polygon_resolution), 1.0)
-    major_sizes = np.maximum(polygons.sizes[:, 0], polygons.sizes[:, 1]) * scale
-    palette = _outline_palette_for_sizes(major_sizes)
-
-    for idx in range(polygons.count):
-        color = palette[idx]
-        cx = float(polygons.centers[idx, 0] * scale)
-        cy = float(polygons.centers[idx, 1] * scale)
-        sx = float(polygons.sizes[idx, 0] * scale)
-        sy = float(polygons.sizes[idx, 1] * scale)
-        rot = float(polygons.rotations[idx])
-        shape_type = int(polygons.shape_types[idx])
-        params = polygons.shape_params[idx] * scale
-
-        if shape_type in {SHAPE_TRIANGLE, SHAPE_QUAD, SHAPE_BEZIER_PATCH}:
-            pts = _local_polygon_points(
-                SHAPE_QUAD if shape_type == SHAPE_BEZIER_PATCH else shape_type,
-                center_x=cx,
-                center_y=cy,
-                size_x=sx,
-                size_y=sy,
-                rotation=rot,
-            )
-            points = [(float(p[0]), float(p[1])) for p in pts]
-            draw.polygon(points, outline=color, width=1)
-            continue
-
-        if shape_type == SHAPE_ELLIPSE:
-            draw.ellipse((cx - sx, cy - sy, cx + sx, cy + sy), outline=color, width=1)
-            continue
-
-        if shape_type == SHAPE_THIN_STROKE:
-            x2 = float(params[0])
-            y2 = float(params[1])
-            width = int(max(1, round(float(params[2]))))
-            draw.line((cx, cy, x2, y2), fill=color, width=width)
-            continue
-
-        if shape_type == SHAPE_ANNULAR_SEGMENT:
-            inner_r = float(min(sx, sy))
-            outer_r = float(max(sx, sy))
-            start_deg = float(np.degrees(polygons.shape_params[idx, 0]))
-            end_deg = float(np.degrees(polygons.shape_params[idx, 1]))
-
-            draw.arc(
-                (cx - outer_r, cy - outer_r, cx + outer_r, cy + outer_r),
-                start=start_deg,
-                end=end_deg,
-                fill=color,
-                width=1,
-            )
-            draw.arc(
-                (cx - inner_r, cy - inner_r, cx + inner_r, cy + inner_r),
-                start=start_deg,
-                end=end_deg,
-                fill=color,
-                width=1,
-            )
-
-            a0 = float(polygons.shape_params[idx, 0])
-            a1 = float(polygons.shape_params[idx, 1])
-            for a in (a0, a1):
-                x_in = cx + inner_r * float(np.cos(a))
-                y_in = cy + inner_r * float(np.sin(a))
-                x_out = cx + outer_r * float(np.cos(a))
-                y_out = cy + outer_r * float(np.sin(a))
-                draw.line((x_in, y_in, x_out, y_out), fill=color, width=1)
-
-    return (np.asarray(canvas, dtype=np.float32) / 255.0).astype(np.float32, copy=False)
 
 
 def handle_phase7_control_key(
@@ -430,16 +258,9 @@ def handle_phase7_control_key(
     quit_callback,
 ) -> str:
     normalized = (key or "").lower()
-
     if normalized == "p":
         controls.paused = not controls.paused
         return "pause"
-    if normalized == "s":
-        controls.show_segmentation_overlay = not controls.show_segmentation_overlay
-        return "segmentation-toggle"
-    if normalized == "e":
-        controls.residual_mode = (controls.residual_mode + 1) % 3
-        return "error-mode-cycle"
     if normalized == "r":
         screenshot_callback()
         return "screenshot"
@@ -447,30 +268,45 @@ def handle_phase7_control_key(
         controls.quit_requested = True
         quit_callback()
         return "quit"
-    if normalized in {"1", "2", "3"}:
-        controls.view_mode = int(normalized) - 1
-        return "variant-switch"
-    if normalized == "v":
-        controls.view_mode = (controls.view_mode + 1) % 3
-        return "view-cycle"
-    if normalized == "g":
-        controls.force_growth_requested = True
-        return "force-growth"
-    if normalized == "d":
-        controls.correction_requested = True
-        return "residual-correction"
-    if normalized in {"+", "="}:
-        controls.softness_scale = float(
-            np.clip(controls.softness_scale * 1.1, 0.2, 3.0)
-        )
-        return "softness-up"
-    if normalized in {"-", "_"}:
-        controls.softness_scale = float(
-            np.clip(controls.softness_scale / 1.1, 0.2, 3.0)
-        )
-        return "softness-down"
-
     return "noop"
+
+
+def _run_stage_steps(
+    *,
+    optimizer: LiveJointOptimizer,
+    controls: Phase7ControlState,
+    stage_name: str,
+    steps: int,
+    start_softness: float,
+    end_softness: float,
+    deadline_reached,
+    emit_update,
+    max_total_steps: int | None,
+    total_points: int,
+) -> int:
+    executed = 0
+    for i in range(max(0, steps)):
+        if controls.quit_requested or deadline_reached():
+            break
+        if max_total_steps is not None and total_points + executed >= max_total_steps:
+            break
+
+        while controls.paused and not controls.quit_requested and not deadline_reached():
+            time.sleep(0.05)
+
+        if controls.quit_requested or deadline_reached():
+            break
+
+        t = i / max(steps - 1, 1)
+        softness = start_softness + (end_softness - start_softness) * t
+        optimizer.step(float(softness))
+        executed += 1
+
+        if executed % 10 == 0:
+            emit_update(stage_name)
+
+    emit_update(stage_name)
+    return executed
 
 
 def execute_phase7_schedule(
@@ -487,360 +323,232 @@ def execute_phase7_schedule(
     if target_image.ndim != 3 or target_image.shape[2] != 3:
         raise ValueError("target_image must have shape (H, W, 3)")
 
-    base_resolution = int(target_image.shape[0])
-    deadline = (
-        time.monotonic() + max(0.0, float(minutes) * 60.0) if minutes > 0.0 else None
-    )
+    target = np.clip(target_image.astype(np.float32, copy=False), 0.0, 1.0)
+    h, w = target.shape[:2]
+
+    start_time = time.monotonic()
+    soft_deadline = start_time + max(0.0, float(minutes) * 60.0) if minutes > 0.0 else None
     hard_deadline = (
-        time.monotonic() + float(hard_timeout_seconds)
+        start_time + float(hard_timeout_seconds)
         if hard_timeout_seconds is not None and hard_timeout_seconds > 0.0
         else None
     )
 
     def _deadline_reached() -> bool:
         now = time.monotonic()
-        return bool(
-            (deadline is not None and now >= deadline)
-            or (hard_deadline is not None and now >= hard_deadline)
-        )
-
-    def _remaining_seconds() -> float | None:
-        now = time.monotonic()
-        candidates: list[float] = []
-        if deadline is not None:
-            candidates.append(float(deadline - now))
-        if hard_deadline is not None:
-            candidates.append(float(hard_deadline - now))
-        if not candidates:
-            return None
-        return float(min(candidates))
+        return bool((soft_deadline is not None and now >= soft_deadline) or (hard_deadline is not None and now >= hard_deadline))
 
     rng = np.random.default_rng(random_seed)
-    cfg = LiveOptimizerConfig(
-        color_lr=0.06,
-        position_lr=0.004,
-        size_lr=0.001,
-        alpha_lr=0.0,
-        render_chunk_size=50,
-        position_update_interval=100,
-        size_update_interval=500,
-        max_fd_polygons=30,
-        max_size_fd_polygons=20,
+    del rng
+
+    init_batch = _grid_initialized_batch(
+        target,
+        count=int(plan.stage_a_initial_polygons),
+        alpha=0.85,
     )
 
-    global_losses: list[float] = []
-    resolution_markers: list[int] = []
+    optimizer = LiveJointOptimizer(
+        target_image=target,
+        rasterizer=SoftRasterizer(height=h, width=w),
+        polygons=init_batch,
+        config=LiveOptimizerConfig(
+            color_lr=0.08,
+            position_lr=0.004,
+            size_lr=0.001,
+            alpha_lr=0.0,
+            position_update_interval=100,
+            size_update_interval=500,
+            max_fd_polygons=30,
+            max_size_fd_polygons=20,
+            render_chunk_size=50,
+            allow_loss_increase=False,
+        ),
+    )
+
+    loss_history: list[float] = [float(optimizer.loss_history[-1])]
+    stage_markers: list[tuple[str, int]] = []
     batch_markers: list[int] = []
-    total_iteration_points = 0
 
-    polygons: LivePolygonBatch | None = None
-    previous_resolution: int | None = None
-    final_canvas = np.ones_like(target_image, dtype=np.float32)
-    final_loss = float(np.mean((target_image - final_canvas) ** 2, dtype=np.float32))
-
-    for round_idx, round_cfg in enumerate(plan.rounds):
-        if controls.quit_requested:
-            break
-        if _deadline_reached():
-            break
-
-        target_level = _resize_rgb(target_image, round_cfg.resolution)
-        rasterizer = SoftRasterizer(
-            height=round_cfg.resolution, width=round_cfg.resolution
+    def _emit(stage_name: str) -> None:
+        canvas = np.array(optimizer.current_canvas, copy=True)
+        loss = _rgb_mse(target, canvas)
+        status = f"stage={stage_name} polygons={optimizer.polygons.count} rgb_mse={loss:.6f}"
+        shared_update_callback(
+            canvas,
+            optimizer.polygons.copy(),
+            w,
+            list(loss_history),
+            [],
+            list(batch_markers),
+            stage_name,
+            len(loss_history),
+            loss,
+            True,
+            status,
+            list(stage_markers),
         )
 
-        if polygons is None:
-            polygons = make_random_live_batch_with_bounds(
-                count=max(12, min(24, max(1, plan.polygon_budget // 20))),
-                height=round_cfg.resolution,
-                width=round_cfg.resolution,
-                min_size=round_cfg.min_size,
-                max_size=round_cfg.max_size,
-                rng=rng,
-            )
-            if not global_losses:
-                preview_optimizer = LiveJointOptimizer(
-                    target_image=target_level,
-                    rasterizer=rasterizer,
-                    polygons=polygons.copy(),
-                    config=cfg,
-                )
-                global_losses.append(float(preview_optimizer.loss_history[-1]))
-                total_iteration_points = len(global_losses)
-                final_canvas = _resize_rgb(
-                    preview_optimizer.current_canvas, base_resolution
-                )
-                final_loss = float(
-                    np.mean((target_image - final_canvas) ** 2, dtype=np.float32)
-                )
-                shared_update_callback(
-                    final_canvas,
-                    polygons,
-                    round_cfg.resolution,
-                    global_losses,
-                    resolution_markers,
-                    batch_markers,
-                    round_cfg.name,
-                    total_iteration_points,
-                    final_loss,
-                    True,
-                    f"round {round_idx + 1}/{len(plan.rounds)} initialized",
-                )
-        else:
-            if previous_resolution is None:
-                raise RuntimeError("previous_resolution missing during round scaling")
-            polygons = _scale_polygons(
-                polygons,
-                old_resolution=previous_resolution,
-                new_resolution=round_cfg.resolution,
-            )
+    def _extend_history(count: int) -> None:
+        if count <= 0:
+            return
+        start = max(1, len(optimizer.loss_history) - count)
+        for idx in range(start, len(optimizer.loss_history)):
+            loss_history.append(float(optimizer.loss_history[idx]))
 
-        optimizer = LiveJointOptimizer(
-            target_image=target_level,
-            rasterizer=rasterizer,
-            polygons=polygons.copy(),
-            config=cfg,
+    # Stage A: grid init + color-only ADAM.
+    stage_markers.append(("A", len(loss_history)))
+    optimizer.config = replace(
+        optimizer.config,
+        position_update_interval=0,
+        size_update_interval=0,
+        max_fd_polygons=0,
+    )
+    done = _run_stage_steps(
+        optimizer=optimizer,
+        controls=controls,
+        stage_name="A",
+        steps=int(plan.stage_a_steps),
+        start_softness=3.0,
+        end_softness=1.0,
+        deadline_reached=_deadline_reached,
+        emit_update=_emit,
+        max_total_steps=max_total_steps,
+        total_points=len(loss_history),
+    )
+    _extend_history(done)
+
+    # Stage B: targeted medium additions.
+    if not controls.quit_requested and not _deadline_reached():
+        stage_markers.append(("B", len(loss_history)))
+    for batch_idx in range(plan.stage_b_batches):
+        if controls.quit_requested or _deadline_reached():
+            break
+        if max_total_steps is not None and len(loss_history) >= max_total_steps:
+            break
+
+        t = batch_idx / max(plan.stage_b_batches - 1, 1)
+        size_px = float(plan.stage_b_size_start + (plan.stage_b_size_end - plan.stage_b_size_start) * t)
+        _add_targeted_batch(
+            optimizer,
+            target=target,
+            batch_size=int(plan.stage_b_batch_size),
+            size_px=size_px,
+            alpha=0.65,
+            high_frequency=False,
         )
-
-        if round_idx > 0:
-            resolution_markers.append(len(global_losses))
-
-        for batch_size in round_cfg.batch_schedule:
-            if controls.quit_requested:
-                break
-            if _deadline_reached():
-                break
-            if (
-                max_total_steps is not None
-                and total_iteration_points >= max_total_steps
-            ):
-                break
-
-            while controls.paused and not controls.quit_requested:
-                if _deadline_reached():
-                    controls.quit_requested = True
-                    break
-                time.sleep(0.05)
-                if controls.correction_requested:
-                    apply_low_frequency_color_correction(
-                        optimizer,
-                        sigma=10.0,
-                        strength=0.7,
-                        softness=max(
-                            0.2, round_cfg.end_softness * controls.softness_scale
-                        ),
-                    )
-                    controls.correction_requested = False
-
-            if controls.quit_requested:
-                break
-
-            if controls.correction_requested:
-                apply_low_frequency_color_correction(
-                    optimizer,
-                    sigma=10.0,
-                    strength=0.7,
-                    softness=max(0.2, round_cfg.end_softness * controls.softness_scale),
-                )
-                controls.correction_requested = False
-
-            before_len = len(optimizer.loss_history)
-            batch_markers.append(len(global_losses))
-
-            force_growth = controls.force_growth_requested
-            controls.force_growth_requested = False
-
-            max_steps_per_cycle = int(round_cfg.max_steps_per_cycle)
-            post_add_steps = int(round_cfg.post_add_steps)
-            remaining = _remaining_seconds()
-            if remaining is not None:
-                if remaining <= 0.0:
-                    break
-                throttle = float(np.clip(remaining / 12.0, 0.20, 1.0))
-                if not force_growth:
-                    max_steps_per_cycle = max(
-                        1,
-                        min(
-                            max_steps_per_cycle,
-                            int(np.ceil(max_steps_per_cycle * throttle)),
-                        ),
-                    )
-                post_add_steps = max(
-                    1,
-                    min(post_add_steps, int(np.ceil(post_add_steps * throttle))),
-                )
-
-            start_soft = max(0.2, round_cfg.start_softness * controls.softness_scale)
-            end_soft = max(0.15, round_cfg.end_softness * controls.softness_scale)
-
-            last_emit_time = 0.0
-
-            def _emit_intermediate(opt: LiveJointOptimizer) -> None:
-                nonlocal last_emit_time
-                now = time.monotonic()
-                if (now - last_emit_time) < 0.6:
-                    return
-
-                partial_losses = [float(v) for v in opt.loss_history[before_len:]]
-                if not partial_losses:
-                    partial_losses = [float(opt.loss_history[-1])]
-                losses_view = list(global_losses) + partial_losses
-                if max_total_steps is not None and len(losses_view) > max_total_steps:
-                    losses_view = losses_view[:max_total_steps]
-
-                full_canvas = _resize_rgb(opt.current_canvas, base_resolution)
-                loss_value = float(
-                    np.mean((target_image - full_canvas) ** 2, dtype=np.float32)
-                )
-                remaining_for_status = _remaining_seconds()
-                remaining_text = (
-                    "n/a"
-                    if remaining_for_status is None
-                    else f"{remaining_for_status:.1f}s"
-                )
-
-                status = (
-                    f"{round_cfg.name} | polygons={opt.polygons.count} | "
-                    f"loss={loss_value:.6f} | softness={controls.softness_scale:.2f} | "
-                    f"remaining={remaining_text}"
-                )
-                shared_update_callback(
-                    full_canvas,
-                    opt.polygons.copy(),
-                    round_cfg.resolution,
-                    losses_view,
-                    resolution_markers,
-                    batch_markers,
-                    round_cfg.name,
-                    len(losses_view),
-                    loss_value,
-                    True,
-                    status,
-                )
-                last_emit_time = now
-
-            progressive_growth(
-                optimizer,
-                batch_schedule=[int(batch_size)],
-                max_steps_per_cycle=0 if force_growth else max_steps_per_cycle,
-                post_add_steps=post_add_steps,
-                convergence_window=80,
-                convergence_rel_threshold=0.001,
-                region_window=5,
-                new_polygon_alpha=0.60,
-                min_new_size=float(round_cfg.min_size),
-                max_new_size=float(round_cfg.max_size),
-                use_content_aware_shapes=True,
-                use_high_frequency_targeting=True,
-                residual_sigma=10.0,
-                low_frequency_correction_strength=0.35,
-                max_add_attempts=2,
-                enforce_cycle_improvement=False,
-                max_recovery_steps=0,
-                start_softness=start_soft,
-                end_softness=end_soft,
-                progress_callback=_emit_intermediate,
-                progress_every_steps=4,
-            )
-
-            if controls.correction_requested:
-                apply_low_frequency_color_correction(
-                    optimizer,
-                    sigma=10.0,
-                    strength=0.7,
-                    softness=max(0.2, end_soft),
-                )
-                controls.correction_requested = False
-
-            new_losses = [float(v) for v in optimizer.loss_history[before_len:]]
-            if not new_losses:
-                new_losses = [float(optimizer.loss_history[-1])]
-
-            global_losses.extend(new_losses)
-            total_iteration_points = len(global_losses)
-
-            if max_total_steps is not None and total_iteration_points > max_total_steps:
-                global_losses = global_losses[:max_total_steps]
-                total_iteration_points = len(global_losses)
-
-            full_canvas = _resize_rgb(optimizer.current_canvas, base_resolution)
-            loss_value = float(
-                np.mean((target_image - full_canvas) ** 2, dtype=np.float32)
-            )
-            remaining_for_status = _remaining_seconds()
-            remaining_text = (
-                "n/a"
-                if remaining_for_status is None
-                else f"{remaining_for_status:.1f}s"
-            )
-
-            status = (
-                f"{round_cfg.name} | polygons={optimizer.polygons.count} | "
-                f"loss={loss_value:.6f} | softness={controls.softness_scale:.2f} | "
-                f"remaining={remaining_text}"
-            )
-            shared_update_callback(
-                full_canvas,
-                optimizer.polygons.copy(),
-                round_cfg.resolution,
-                global_losses,
-                resolution_markers,
-                batch_markers,
-                round_cfg.name,
-                total_iteration_points,
-                loss_value,
-                True,
-                status,
-            )
-
-        polygons = optimizer.polygons.copy()
-        previous_resolution = int(round_cfg.resolution)
-        final_canvas = _resize_rgb(optimizer.current_canvas, base_resolution)
-        final_loss = float(
-            np.mean((target_image - final_canvas) ** 2, dtype=np.float32)
+        batch_markers.append(len(loss_history))
+        optimizer.config = replace(
+            optimizer.config,
+            position_update_interval=100,
+            size_update_interval=500,
+            max_fd_polygons=30,
+            max_size_fd_polygons=20,
         )
+        done = _run_stage_steps(
+            optimizer=optimizer,
+            controls=controls,
+            stage_name="B",
+            steps=int(plan.stage_b_steps_per_batch),
+            start_softness=1.2,
+            end_softness=0.7,
+            deadline_reached=_deadline_reached,
+            emit_update=_emit,
+            max_total_steps=max_total_steps,
+            total_points=len(loss_history),
+        )
+        _extend_history(done)
 
-        if controls.quit_requested:
+    # Stage C: high-frequency detail additions.
+    if not controls.quit_requested and not _deadline_reached():
+        stage_markers.append(("C", len(loss_history)))
+    for batch_idx in range(plan.stage_c_batches):
+        if controls.quit_requested or _deadline_reached():
             break
-        if _deadline_reached():
+        if max_total_steps is not None and len(loss_history) >= max_total_steps:
             break
-        if max_total_steps is not None and total_iteration_points >= max_total_steps:
-            break
+
+        t = batch_idx / max(plan.stage_c_batches - 1, 1)
+        size_px = float(plan.stage_c_size_start + (plan.stage_c_size_end - plan.stage_c_size_start) * t)
+        _add_targeted_batch(
+            optimizer,
+            target=target,
+            batch_size=int(plan.stage_c_batch_size),
+            size_px=size_px,
+            alpha=0.60,
+            high_frequency=True,
+        )
+        batch_markers.append(len(loss_history))
+        optimizer.config = replace(
+            optimizer.config,
+            position_update_interval=100,
+            size_update_interval=500,
+            max_fd_polygons=30,
+            max_size_fd_polygons=20,
+        )
+        done = _run_stage_steps(
+            optimizer=optimizer,
+            controls=controls,
+            stage_name="C",
+            steps=int(plan.stage_c_steps_per_batch),
+            start_softness=0.9,
+            end_softness=0.45,
+            deadline_reached=_deadline_reached,
+            emit_update=_emit,
+            max_total_steps=max_total_steps,
+            total_points=len(loss_history),
+        )
+        _extend_history(done)
+
+    # Stage D: global refinement with position updates for all polygons.
+    if not controls.quit_requested and not _deadline_reached():
+        stage_markers.append(("D", len(loss_history)))
+    optimizer.config = replace(
+        optimizer.config,
+        position_update_interval=50,
+        size_update_interval=0,
+        max_fd_polygons=None,
+    )
+    done = _run_stage_steps(
+        optimizer=optimizer,
+        controls=controls,
+        stage_name="D",
+        steps=int(plan.stage_d_steps),
+        start_softness=0.8,
+        end_softness=0.3,
+        deadline_reached=_deadline_reached,
+        emit_update=_emit,
+        max_total_steps=max_total_steps,
+        total_points=len(loss_history),
+    )
+    _extend_history(done)
+
+    final_canvas = np.array(optimizer.current_canvas, copy=True)
+    final_rgb_mse = _rgb_mse(target, final_canvas)
 
     shared_update_callback(
         final_canvas,
-        polygons
-        if polygons is not None
-        else LivePolygonBatch(
-            centers=np.zeros((0, 2), dtype=np.float32),
-            sizes=np.zeros((0, 2), dtype=np.float32),
-            rotations=np.zeros((0,), dtype=np.float32),
-            colors=np.zeros((0, 3), dtype=np.float32),
-            alphas=np.zeros((0,), dtype=np.float32),
-            shape_types=np.zeros((0,), dtype=np.int32),
-            shape_params=np.zeros((0, 6), dtype=np.float32),
-        ),
-        previous_resolution
-        if previous_resolution is not None
-        else target_image.shape[0],
-        global_losses,
-        resolution_markers,
-        batch_markers,
-        "complete",
-        len(global_losses),
-        final_loss,
+        optimizer.polygons.copy(),
+        w,
+        list(loss_history),
+        [],
+        list(batch_markers),
+        "done",
+        len(loss_history),
+        final_rgb_mse,
         False,
         "complete",
+        list(stage_markers),
     )
 
     return Phase7ExecutionResult(
         final_canvas=final_canvas,
-        final_loss=final_loss,
-        polygon_count=0 if polygons is None else polygons.count,
-        iterations=len(global_losses),
-        loss_history=list(global_losses),
-        resolution_markers=list(resolution_markers),
+        final_loss=final_rgb_mse,
+        polygon_count=optimizer.polygons.count,
+        iterations=len(loss_history),
+        loss_history=list(loss_history),
+        resolution_markers=[],
         batch_markers=list(batch_markers),
+        stage_markers=list(stage_markers),
     )
 
 
@@ -854,6 +562,7 @@ def run_phase7_headless(
     hard_timeout_seconds: float | None = None,
     max_total_steps: int | None = None,
 ) -> Phase7ExecutionResult:
+    del segmentation_map
     controls = Phase7ControlState()
 
     def _noop_update(
@@ -863,25 +572,15 @@ def run_phase7_headless(
         _losses: list[float],
         _resolution_markers: list[int],
         _batch_markers: list[int],
-        _round_name: str,
+        _stage_name: str,
         _iteration: int,
         _loss: float,
         _running: bool,
         _status: str,
+        _stage_markers: list[tuple[str, int]],
     ) -> None:
-        del _canvas
-        del _polygons
-        del _polygon_resolution
-        del _losses
-        del _resolution_markers
-        del _batch_markers
-        del _round_name
-        del _iteration
-        del _loss
-        del _running
-        del _status
+        return
 
-    del segmentation_map
     return execute_phase7_schedule(
         target_image=target_image,
         plan=plan,
@@ -902,45 +601,28 @@ def run_phase7_live_display(
     random_seed: int,
     minutes: float,
     hard_timeout_seconds: float | None = None,
-    update_interval_ms: int = 2000,
+    update_interval_ms: int = 5000,
     close_after_seconds: float | None = None,
     max_total_steps: int | None = None,
 ) -> Phase7ExecutionResult:
-    resolution = int(target_image.shape[0])
-    empty_canvas = np.ones_like(target_image, dtype=np.float32)
-    empty_poly = LivePolygonBatch(
-        centers=np.zeros((0, 2), dtype=np.float32),
-        sizes=np.zeros((0, 2), dtype=np.float32),
-        rotations=np.zeros((0,), dtype=np.float32),
-        colors=np.zeros((0, 3), dtype=np.float32),
-        alphas=np.zeros((0,), dtype=np.float32),
-        shape_types=np.zeros((0,), dtype=np.int32),
-        shape_params=np.zeros((0, 6), dtype=np.float32),
-    )
+    del segmentation_map
+
+    target = np.clip(target_image.astype(np.float32, copy=False), 0.0, 1.0)
+    h, w = target.shape[:2]
+    blank = np.ones_like(target, dtype=np.float32)
 
     shared = _SharedViewState(
-        target=np.array(target_image, copy=True),
-        segmentation_map=None
-        if segmentation_map is None
-        else np.array(segmentation_map, copy=True),
-        canvas=np.array(empty_canvas, copy=True),
-        signed_residual=_signed_residual_rgb(target_image, empty_canvas),
-        abs_residual=_absolute_residual_rgb(target_image, empty_canvas),
-        mse_residual=_mse_residual_rgb(target_image, empty_canvas),
-        polygon_preview=make_polygon_outline_preview(
-            empty_poly, polygon_resolution=resolution, output_resolution=resolution
-        ),
-        loss_history=[
-            float(np.mean((target_image - empty_canvas) ** 2, dtype=np.float32))
-        ],
-        resolution_markers=[],
-        batch_markers=[],
-        round_name="initializing",
-        current_resolution=resolution,
+        target=np.array(target, copy=True),
+        canvas=np.array(blank, copy=True),
+        signed_residual=_signed_residual(target, blank),
+        loss_history=[_rgb_mse(target, blank)],
+        stage_markers=[],
         polygon_count=0,
         iteration=0,
+        stage_name="init",
         running=True,
         status_line="initializing",
+        polygon_sizes=np.zeros((0,), dtype=np.float32),
     )
 
     controls = Phase7ControlState()
@@ -950,44 +632,33 @@ def run_phase7_live_display(
     def _update_shared(
         canvas: np.ndarray,
         polygons: LivePolygonBatch,
-        polygon_resolution: int,
+        _polygon_resolution: int,
         losses: list[float],
-        resolution_markers: list[int],
-        batch_markers: list[int],
-        round_name: str,
+        _resolution_markers: list[int],
+        _batch_markers: list[int],
+        stage_name: str,
         iteration: int,
         _loss: float,
         running: bool,
         status: str,
+        stage_markers: list[tuple[str, int]],
     ) -> None:
-        preview = make_polygon_outline_preview(
-            polygons,
-            polygon_resolution=int(polygon_resolution),
-            output_resolution=resolution,
-        )
-        signed = _signed_residual_rgb(shared.target, canvas)
-        abs_res = _absolute_residual_rgb(shared.target, canvas)
-        mse_res = _mse_residual_rgb(shared.target, canvas)
-
+        sizes = np.maximum(polygons.sizes[:, 0], polygons.sizes[:, 1]).astype(np.float32)
         with lock:
             shared.canvas = np.array(canvas, copy=True)
-            shared.signed_residual = signed
-            shared.abs_residual = abs_res
-            shared.mse_residual = mse_res
-            shared.polygon_preview = preview
+            shared.signed_residual = _signed_residual(shared.target, shared.canvas)
             shared.loss_history = list(losses)
-            shared.resolution_markers = list(resolution_markers)
-            shared.batch_markers = list(batch_markers)
-            shared.round_name = str(round_name)
-            shared.current_resolution = int(polygon_resolution)
+            shared.stage_markers = list(stage_markers)
             shared.polygon_count = int(polygons.count)
             shared.iteration = int(iteration)
+            shared.stage_name = str(stage_name)
             shared.running = bool(running)
             shared.status_line = str(status)
+            shared.polygon_sizes = sizes
 
     def _worker() -> None:
-        result = execute_phase7_schedule(
-            target_image=target_image,
+        result_holder["result"] = execute_phase7_schedule(
+            target_image=target,
             plan=plan,
             random_seed=random_seed,
             minutes=minutes,
@@ -996,81 +667,70 @@ def run_phase7_live_display(
             shared_update_callback=_update_shared,
             max_total_steps=max_total_steps,
         )
-        result_holder["result"] = result
 
     worker = threading.Thread(target=_worker, daemon=True)
     worker.start()
 
     fig = plt.figure(figsize=(16, 9))
-    grid = fig.add_gridspec(2, 3, height_ratios=[1.0, 1.05], hspace=0.25, wspace=0.22)
+    gs = fig.add_gridspec(2, 3, height_ratios=[1.0, 1.05], hspace=0.30, wspace=0.24)
 
-    ax_target = fig.add_subplot(grid[0, 0])
-    ax_current = fig.add_subplot(grid[0, 1])
-    ax_residual = fig.add_subplot(grid[0, 2])
-    ax_polygons = fig.add_subplot(grid[1, 0])
-    ax_loss = fig.add_subplot(grid[1, 1:])
+    ax_target = fig.add_subplot(gs[0, 0])
+    ax_canvas = fig.add_subplot(gs[0, 1])
+    ax_error = fig.add_subplot(gs[0, 2])
 
-    target_im = ax_target.imshow(shared.target)
-    target_im.set_interpolation("nearest")
-    ax_target.set_title("Panel 1 - Target")
+    ax_curve = fig.add_subplot(gs[1, 0:2])
+    right = gs[1, 2].subgridspec(2, 1, height_ratios=[0.62, 0.38], hspace=0.25)
+    ax_stats = fig.add_subplot(right[0, 0])
+    ax_sizes = fig.add_subplot(right[1, 0])
+
+    im_target = ax_target.imshow(shared.target)
+    im_target.set_interpolation("nearest")
+    ax_target.set_title("Target")
     ax_target.set_xticks([])
     ax_target.set_yticks([])
 
-    seg_overlay = None
-    if shared.segmentation_map is not None:
-        seg_overlay = ax_target.imshow(
-            shared.segmentation_map,
-            cmap="tab20",
-            alpha=0.28,
-            interpolation="nearest",
-            visible=False,
-        )
+    im_canvas = ax_canvas.imshow(shared.canvas)
+    im_canvas.set_interpolation("nearest")
+    ax_canvas.set_title("Current Canvas")
+    ax_canvas.set_xticks([])
+    ax_canvas.set_yticks([])
 
-    current_im = ax_current.imshow(shared.canvas)
-    current_im.set_interpolation("nearest")
-    ax_current.set_title("Panel 2 - Reconstruction")
-    ax_current.set_xticks([])
-    ax_current.set_yticks([])
+    im_error = ax_error.imshow(shared.signed_residual, cmap="coolwarm", vmin=-1.0, vmax=1.0)
+    im_error.set_interpolation("nearest")
+    ax_error.set_title("Signed Residual")
+    ax_error.set_xticks([])
+    ax_error.set_yticks([])
 
-    residual_im = ax_residual.imshow(shared.signed_residual)
-    residual_im.set_interpolation("nearest")
-    ax_residual.set_title("Panel 3 - Residual (signed)")
-    ax_residual.set_xticks([])
-    ax_residual.set_yticks([])
+    ax_curve.set_title("MSE Curve (log) with Stage Transitions")
+    ax_curve.set_xlabel("Iteration")
+    ax_curve.set_ylabel("MSE (log)")
+    ax_curve.set_yscale("log")
+    ax_curve.grid(True, alpha=0.25)
+    (loss_line,) = ax_curve.plot([], [], color="tab:blue", linewidth=1.8)
+    marker_lines: list = []
 
-    polygons_im = ax_polygons.imshow(shared.polygon_preview)
-    polygons_im.set_interpolation("nearest")
-    ax_polygons.set_title("Panel 4 - Polygon Outlines")
-    ax_polygons.set_xticks([])
-    ax_polygons.set_yticks([])
-
-    ax_loss.set_title("Panel 5 - Log MSE Curve")
-    ax_loss.set_xlabel("Iteration")
-    ax_loss.set_ylabel("MSE (log)")
-    ax_loss.set_yscale("log")
-    ax_loss.grid(True, alpha=0.25)
-    (loss_line,) = ax_loss.plot([], [], color="tab:blue", linewidth=1.8)
-    status_text = ax_loss.text(
+    ax_stats.axis("off")
+    stats_text = ax_stats.text(
         0.01,
         0.98,
         "",
         va="top",
         ha="left",
-        fontsize=8,
         family="monospace",
-        transform=ax_loss.transAxes,
-        wrap=True,
-        bbox={"boxstyle": "round,pad=0.25", "fc": "white", "ec": "0.7", "alpha": 0.8},
+        fontsize=9,
+        transform=ax_stats.transAxes,
     )
 
-    marker_artists: list = []
+    ax_sizes.set_title("Polygon Size Histogram")
+    ax_sizes.set_xlabel("Size")
+    ax_sizes.set_ylabel("Count")
 
     def _save_screenshot() -> Path:
         out_dir = Path("outputs")
         out_dir.mkdir(parents=True, exist_ok=True)
         ts = time.strftime("%Y%m%d_%H%M%S")
-        out = out_dir / f"phase7_live_{ts}.png"
-        fig.savefig(out, dpi=180, bbox_inches="tight")
+        out = out_dir / f"phase7_single_{ts}.png"
+        fig.savefig(out, dpi=170, bbox_inches="tight")
         return out
 
     def _quit() -> None:
@@ -1091,7 +751,7 @@ def run_phase7_live_display(
     fig.canvas.mpl_connect("close_event", _on_close)
 
     if close_after_seconds is not None and close_after_seconds > 0:
-        timer = fig.canvas.new_timer(interval=int(close_after_seconds * 1000.0))
+        timer = fig.canvas.new_timer(interval=int(close_after_seconds * 1000))
         timer.add_callback(lambda: plt.close(fig))
         timer.start()
 
@@ -1099,112 +759,81 @@ def run_phase7_live_display(
         with lock:
             canvas = np.array(shared.canvas, copy=True)
             signed = np.array(shared.signed_residual, copy=True)
-            abs_res = np.array(shared.abs_residual, copy=True)
-            mse_res = np.array(shared.mse_residual, copy=True)
-            poly_preview = np.array(shared.polygon_preview, copy=True)
             losses = np.array(shared.loss_history, dtype=np.float64)
-            res_markers = list(shared.resolution_markers)
-            batch_marks = list(shared.batch_markers)
+            stage_markers = list(shared.stage_markers)
+            stage_name = str(shared.stage_name)
             iteration = int(shared.iteration)
             polygon_count = int(shared.polygon_count)
-            round_name = str(shared.round_name)
             running = bool(shared.running)
             status = str(shared.status_line)
-            show_seg = bool(controls.show_segmentation_overlay)
-            view_mode = int(controls.view_mode)
-            residual_mode = int(controls.residual_mode)
-            softness = float(controls.softness_scale)
             paused = bool(controls.paused)
+            sizes = np.array(shared.polygon_sizes, copy=True)
 
-        if seg_overlay is not None:
-            seg_overlay.set_visible(show_seg)
-
-        if view_mode == 0:
-            current_im.set_data(canvas)
-            ax_current.set_title("Panel 2 - Reconstruction")
-        elif view_mode == 1:
-            current_im.set_data(signed)
-            ax_current.set_title("Panel 2 - Focus View: Residual")
-        else:
-            current_im.set_data(poly_preview)
-            ax_current.set_title("Panel 2 - Focus View: Polygon Outlines")
-
-        if residual_mode == 0:
-            residual_im.set_data(signed)
-            ax_residual.set_title("Panel 3 - Residual (signed)")
-        elif residual_mode == 1:
-            residual_im.set_data(abs_res)
-            ax_residual.set_title("Panel 3 - Residual (absolute)")
-        else:
-            residual_im.set_data(mse_res)
-            ax_residual.set_title("Panel 3 - Residual (MSE)")
-
-        polygons_im.set_data(poly_preview)
+        im_canvas.set_data(canvas)
+        im_error.set_data(signed)
 
         x = np.arange(losses.size)
         if losses.size > 0:
-            loss_line.set_data(x, losses)
+            loss_line.set_data(x, np.maximum(losses, 1e-9))
             y = np.maximum(losses, 1e-9)
             y_min = max(1e-9, float(np.min(y) * 0.9))
             y_max = max(float(np.max(y) * 1.1), y_min * 10.0)
-            ax_loss.set_ylim(y_min, y_max)
-            ax_loss.set_xlim(0, max(10, int(x[-1]) + 5))
+            ax_curve.set_ylim(y_min, y_max)
+            ax_curve.set_xlim(0, max(10, int(x[-1]) + 5))
 
-        for artist in marker_artists:
-            artist.remove()
-        marker_artists.clear()
+        for line in marker_lines:
+            line.remove()
+        marker_lines.clear()
 
-        for idx in res_markers:
-            marker_artists.append(
-                ax_loss.axvline(
-                    int(idx), linestyle="--", color="gray", alpha=0.8, linewidth=1.1
-                )
+        for name, idx in stage_markers:
+            marker_lines.append(
+                ax_curve.axvline(int(idx), linestyle="--", color="gray", alpha=0.65, linewidth=1.1)
             )
-        for idx in batch_marks:
-            marker_artists.append(
-                ax_loss.axvline(
-                    int(idx), linestyle="-", color="#ff8c42", alpha=0.20, linewidth=0.8
-                )
+            ax_curve.text(
+                int(idx),
+                ax_curve.get_ylim()[1] * 0.92,
+                name,
+                fontsize=8,
+                ha="center",
+                va="top",
+                color="gray",
             )
 
-        keys_help = textwrap.fill(
-            "keys: P pause | S seg | E residual mode | R shot | Q quit | 1/2/3 view | V cycle view | G grow | D correct | +/- softness",
-            width=76,
-            break_long_words=False,
-        )
-        state_line = textwrap.fill(
-            f"state           : {status}",
-            width=76,
-            break_long_words=False,
-        )
-        status_text.set_text(
+        stats_text.set_text(
             "\n".join(
                 [
-                    f"round           : {round_name}",
-                    f"iteration       : {iteration}",
-                    f"polygons        : {polygon_count}",
-                    f"live softness   : {softness:.2f}",
-                    f"paused          : {paused}",
-                    state_line,
-                    keys_help,
+                    f"stage      : {stage_name}",
+                    f"iteration  : {iteration}",
+                    f"polygons   : {polygon_count}",
+                    f"rgb mse    : {losses[-1]:.6f}" if losses.size else "rgb mse    : n/a",
+                    f"paused     : {paused}",
+                    f"state      : {status}",
+                    "keys: P pause | R screenshot | Q quit",
                 ]
             )
         )
 
+        ax_sizes.clear()
+        ax_sizes.set_title("Polygon Size Histogram")
+        ax_sizes.set_xlabel("Size")
+        ax_sizes.set_ylabel("Count")
+        if sizes.size > 0:
+            bins = min(10, max(3, int(np.sqrt(sizes.size))))
+            hist, edges = np.histogram(sizes, bins=bins)
+            centers = 0.5 * (edges[:-1] + edges[1:])
+            widths = np.maximum(edges[1:] - edges[:-1], 1e-3)
+            ax_sizes.bar(centers, hist, width=widths * 0.9, color="tab:orange", alpha=0.8)
+
         if controls.quit_requested and not running:
             anim.event_source.stop()
 
-        if not running and not worker.is_alive():
-            if controls.quit_requested:
-                anim.event_source.stop()
-
         fig.canvas.draw_idle()
-        return (current_im, residual_im, polygons_im, loss_line, status_text)
+        return (im_canvas, im_error, loss_line, stats_text)
 
     anim = FuncAnimation(
         fig,
         update,
-        interval=max(50, int(update_interval_ms)),
+        interval=max(200, int(update_interval_ms)),
         blit=False,
         cache_frame_data=False,
     )
@@ -1221,18 +850,16 @@ def run_phase7_live_display(
     with lock:
         canvas = np.array(shared.canvas, copy=True)
         losses = list(shared.loss_history)
-        markers_r = list(shared.resolution_markers)
-        markers_b = list(shared.batch_markers)
+        stage_marks = list(shared.stage_markers)
         poly_count = int(shared.polygon_count)
 
     return Phase7ExecutionResult(
         final_canvas=canvas,
-        final_loss=float(losses[-1])
-        if losses
-        else float(np.mean((target_image - canvas) ** 2, dtype=np.float32)),
+        final_loss=float(losses[-1]) if losses else _rgb_mse(target, canvas),
         polygon_count=poly_count,
         iterations=len(losses),
         loss_history=losses,
-        resolution_markers=markers_r,
-        batch_markers=markers_b,
+        resolution_markers=[],
+        batch_markers=[],
+        stage_markers=stage_marks,
     )
