@@ -7,17 +7,6 @@ import sys
 import numpy as np
 from PIL import Image
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from src.live_phase7 import (
-    Phase7ControlState,
-    build_phase7_plan,
-    execute_phase7_schedule,
-)
-from src.preprocessing import preprocess_target_array
-
 
 def prepare_image_square(image_path: Path, resolution: int) -> np.ndarray:
     with Image.open(image_path) as img:
@@ -33,6 +22,16 @@ def prepare_image_square(image_path: Path, resolution: int) -> np.ndarray:
 
 def main() -> int:
     project_root = Path(__file__).resolve().parents[1]
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+
+    from src.live_phase7 import (
+        Phase7ControlState,
+        build_phase7_plan,
+        execute_phase7_schedule,
+    )
+    from src.preprocessing import preprocess_target_array
+
     targets = [
         project_root / "targets" / "internet_portrait.jpg",
         project_root / "targets" / "internet_landscape.jpg",
