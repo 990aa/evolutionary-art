@@ -118,9 +118,9 @@ Set-Location python
 uv run python scripts/verify_pptx.py ..\slides\dist\Attention_Guided_Evolutionary_Art_Abdul_Ahad.pptx --expected-slides 10
 ```
 
-## Academic Report
-Detailed report (Python component only):
-- [docs/academic_report.md](docs/academic_report.md)
+## Academic Paper
+Detailed paper (Python component only):
+- [docs/academic_paper.md](docs/academic_paper.md)
 
 Supporting diagrams:
 - [docs/figures/architecture_diagram.png](docs/figures/architecture_diagram.png)
