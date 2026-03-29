@@ -101,7 +101,6 @@ def test_phase6_residual_decomposition_and_targeting() -> None:
         polygons=base_polygons.copy(),
         config=config,
     )
-    raw_start = float(raw_optimizer.loss_history[-1])
     raw_hf_start = float(
         np.mean(
             high_frequency_error_map(target, raw_optimizer.current_canvas, sigma=10.0),
@@ -128,7 +127,6 @@ def test_phase6_residual_decomposition_and_targeting() -> None:
         start_softness=1.0,
         end_softness=0.6,
     )
-    raw_drop = raw_start - float(raw_optimizer.loss_history[-1])
     raw_hf_drop = raw_hf_start - float(
         np.mean(
             high_frequency_error_map(target, raw_optimizer.current_canvas, sigma=10.0),

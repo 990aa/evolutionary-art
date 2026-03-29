@@ -332,8 +332,13 @@ def main() -> int:
     print(f"final_iteration: {result.iterations}")
     print(f"accepted_polygons: {result.polygon_count}")
     print(f"final_mse: {result.final_loss:.6f}")
-    if result.loss_history:
-        print(f"mse_improvement: {result.loss_history[0] - result.final_loss:.6f}")
+    initial_mse = float(
+        np.mean(
+            (preprocessed.target_rgb - np.ones_like(preprocessed.target_rgb)) ** 2,
+            dtype=np.float32,
+        )
+    )
+    print(f"mse_improvement: {initial_mse - result.final_loss:.6f}")
 
     return 0
 
