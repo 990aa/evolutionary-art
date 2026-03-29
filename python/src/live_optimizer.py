@@ -375,6 +375,7 @@ class LiveJointOptimizer:
             chunk_size=self.config.render_chunk_size,
         )
         previous_loss = self._loss(render.canvas)
+        baseline_loss = float(self.loss_history[-1])
 
         grad_color = self._color_gradient(render)
         grad_alpha = self._alpha_gradient(render)
@@ -470,13 +471,13 @@ class LiveJointOptimizer:
         )
         updated_loss = self._loss(updated_render.canvas)
 
-        if (not self.config.allow_loss_increase) and (updated_loss > previous_loss):
+        if (not self.config.allow_loss_increase) and (updated_loss > baseline_loss):
             self.polygons.centers = old_centers
             self.polygons.sizes = old_sizes
             self.polygons.colors = old_colors
             self.polygons.alphas = old_alphas
             updated_render = render
-            updated_loss = previous_loss
+            updated_loss = baseline_loss
 
         self.current_canvas = updated_render.canvas
         self.step_count += 1

@@ -257,28 +257,46 @@ def apply_low_frequency_color_correction(
 
     low_at_centers = comp.low_frequency[centers[:, 1], centers[:, 0]]
 
+    base_render = optimizer.rasterizer.render(
+        optimizer.polygons,
+        softness=softness,
+        chunk_size=optimizer.config.render_chunk_size,
+    )
+    weight_mass = np.sum(base_render.weights, axis=(1, 2), dtype=np.float32)
+    weighted_low = np.einsum(
+        "nhw,hwc->nc", base_render.weights, comp.low_frequency, optimize=True
+    )
+    weighted_delta = weighted_low / np.maximum(weight_mass[:, None], 1e-6)
+
     best_loss = before_loss
     best_canvas: np.ndarray | None = None
     best_colors = np.array(before_colors, copy=True)
 
-    for scale in (1.0, 0.5, 0.25, -0.25):
-        optimizer.polygons.colors = np.clip(
-            before_colors + float(strength * scale) * low_at_centers,
-            0.0,
-            1.0,
-        ).astype(np.float32, copy=False)
+    candidate_deltas = [
+        low_at_centers,
+        weighted_delta,
+        0.5 * low_at_centers + 0.5 * weighted_delta,
+    ]
 
-        render = optimizer.rasterizer.render(
-            optimizer.polygons,
-            softness=softness,
-            chunk_size=optimizer.config.render_chunk_size,
-        )
-        after_loss = float(optimizer._loss(render.canvas, optimizer.target))
+    for delta in candidate_deltas:
+        for scale in (1.0, 0.75, 0.5, 0.25, -0.25):
+            optimizer.polygons.colors = np.clip(
+                before_colors + float(strength * scale) * delta,
+                0.0,
+                1.0,
+            ).astype(np.float32, copy=False)
 
-        if after_loss < best_loss:
-            best_loss = after_loss
-            best_canvas = np.array(render.canvas, copy=True)
-            best_colors = np.array(optimizer.polygons.colors, copy=True)
+            render = optimizer.rasterizer.render(
+                optimizer.polygons,
+                softness=softness,
+                chunk_size=optimizer.config.render_chunk_size,
+            )
+            after_loss = float(optimizer._loss(render.canvas, optimizer.target))
+
+            if after_loss < best_loss:
+                best_loss = after_loss
+                best_canvas = np.array(render.canvas, copy=True)
+                best_colors = np.array(optimizer.polygons.colors, copy=True)
 
     if best_canvas is not None and best_loss < before_loss:
         optimizer.polygons.colors = best_colors
