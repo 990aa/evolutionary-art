@@ -20,17 +20,25 @@ class LiveOptimizerConfig:
     size_lr: float = 0.30
     rotation_lr: float = 0.02
     alpha_lr: float = 0.01
+    color_decay_steps: int = 0
+    position_decay_steps: int = 0
+    size_decay_steps: int = 0
+    alpha_decay_steps: int = 0
     position_update_interval: int = 20
+    size_update_interval: int = 1
     max_fd_polygons: int = 40
+    max_size_fd_polygons: int = 20
     render_chunk_size: int = 50
     checkpoint_stride: int = 10
     position_eps_px: float = 2.0
     size_eps_px: float = 1.0
+    size_eps_ratio: float = 0.10
     rotation_eps_rad: float = 0.06
     min_size: float = 3.0
     max_size: float | None = 60.0
     min_alpha: float = 0.05
     max_alpha: float = 0.98
+    exact_fd: bool = True
     allow_loss_increase: bool = True
     use_lab_loss: bool = True
 
@@ -199,7 +207,7 @@ class LiveJointOptimizer:
         rot_grad = np.zeros_like(self.polygons.rotations, dtype=np.float32)
 
         eps_pos = float(max(self.config.position_eps_px, 0.25))
-        eps_size = float(max(self.config.size_eps_px, 0.25))
+        eps_size_base = float(max(self.config.size_eps_px, 0.25))
         eps_rot = float(max(self.config.rotation_eps_rad, 0.01))
 
         max_size = self._max_size()
@@ -211,6 +219,12 @@ class LiveJointOptimizer:
             sx = float(self.polygons.sizes[i, 0])
             sy = float(self.polygons.sizes[i, 1])
             rot = float(self.polygons.rotations[i])
+            eps_size = float(
+                max(
+                    eps_size_base,
+                    self.config.size_eps_ratio * max(abs(sx), abs(sy)),
+                )
+            )
 
             x_plus = self._candidate_loss(
                 index=i,

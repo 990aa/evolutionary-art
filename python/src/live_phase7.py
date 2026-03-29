@@ -22,14 +22,8 @@ from matplotlib.animation import FuncAnimation
 from PIL import Image
 from scipy.ndimage import gaussian_filter
 
+from src.core_renderer import SHAPE_ELLIPSE, SHAPE_QUAD, LivePolygonBatch, SoftRasterizer
 from src.live_optimizer import LiveJointOptimizer, LiveOptimizerConfig
-from src.live_renderer import (
-    SHAPE_ELLIPSE,
-    SHAPE_QUAD,
-    LivePolygonBatch,
-    SoftRasterizer,
-)
-from src.live_schedule import apply_low_frequency_color_correction
 
 
 @dataclass(frozen=True)
@@ -101,47 +95,37 @@ def build_phase7_plan(
     polygon_budget: int,
     complexity_score: float,
 ) -> Phase7Plan:
-    budget = max(120, int(polygon_budget))
+    del base_resolution
+
+    budget = max(128, int(polygon_budget))
     complexity = float(np.clip(complexity_score, 0.0, 1.0))
-    res_scale = float(np.clip(base_resolution / 200.0, 0.75, 2.5))
 
-    a_share = float(np.clip(0.36 - 0.08 * complexity, 0.28, 0.40))
-    b_share = float(np.clip(0.33, 0.30, 0.36))
-
-    a_count = int(round(a_share * budget))
-    b_total = int(round(b_share * budget))
+    a_count = min(64, max(36, int(round(52 + 12 * (1.0 - complexity)))))
+    b_total = int(round(np.clip(0.30 * budget, 64.0, 96.0)))
     c_total = max(40, budget - a_count - b_total)
 
-    b_batches = 8
-    c_batches = 12
+    b_batches = max(1, int(np.ceil(b_total / 20.0)))
+    c_batches = max(1, int(np.ceil(c_total / 15.0)))
 
-    step_scale = float(np.clip(res_scale * (0.85 + 0.45 * complexity), 0.70, 2.20))
-
-    b_size_start = float(
-        np.clip(
-            18.0 * (base_resolution / 200.0) ** 0.35 * (1.10 - 0.30 * complexity),
-            8.0,
-            24.0,
-        )
-    )
-    b_size_end = max(4.0, b_size_start * 0.36)
-    c_size_start = max(3.5, b_size_end)
-    c_size_end = max(1.5, c_size_start * 0.45)
+    b_size_start = 25.0
+    b_size_end = 8.0
+    c_size_start = 10.0
+    c_size_end = 3.0
 
     return Phase7Plan(
         stage_a_initial_polygons=max(20, a_count),
-        stage_a_steps=max(120, int(round(500 * step_scale))),
+        stage_a_steps=400,
         stage_b_batches=b_batches,
         stage_b_batch_size=max(1, int(np.ceil(b_total / b_batches))),
-        stage_b_steps_per_batch=max(40, int(round(200 * step_scale))),
+        stage_b_steps_per_batch=151,
         stage_b_size_start=float(b_size_start),
         stage_b_size_end=float(b_size_end),
         stage_c_batches=c_batches,
         stage_c_batch_size=max(1, int(np.ceil(c_total / c_batches))),
-        stage_c_steps_per_batch=max(20, int(round(50 * step_scale))),
+        stage_c_steps_per_batch=150,
         stage_c_size_start=float(c_size_start),
         stage_c_size_end=float(c_size_end),
-        stage_d_steps=max(180, int(round(1000 * step_scale))),
+        stage_d_steps=500,
     )
 
 
@@ -251,7 +235,7 @@ def _grid_initialized_batch(
     rotations = np.zeros((count,), dtype=np.float32)
     colors = np.zeros((count, 3), dtype=np.float32)
     alphas = np.full((count,), float(alpha), dtype=np.float32)
-    shape_types = np.full((count,), SHAPE_QUAD, dtype=np.int32)
+    shape_types = np.full((count,), SHAPE_ELLIPSE, dtype=np.int32)
     shape_params = np.zeros((count, 6), dtype=np.float32)
 
     idx = 0
@@ -268,8 +252,8 @@ def _grid_initialized_batch(
             cy = int(np.clip((y0 + y1) // 2, 0, h - 1))
 
             centers[idx] = np.array([cx, cy], dtype=np.float32)
-            sx = max(1.0, 0.5 * float(max(1, x1 - x0)))
-            sy = max(1.0, 0.5 * float(max(1, y1 - y0)))
+            sx = max(2.0, 0.70 * 0.5 * float(max(1, x1 - x0)))
+            sy = max(2.0, 0.70 * 0.5 * float(max(1, y1 - y0)))
             sizes[idx] = np.array([sx, sy], dtype=np.float32)
 
             patch = target[y0:y1, x0:x1]
@@ -332,14 +316,64 @@ def _high_frequency_error_map(target: np.ndarray, canvas: np.ndarray) -> np.ndar
     return gaussian_filter(hf, sigma=1.0, mode="reflect").astype(np.float32, copy=False)
 
 
+def _apply_residual_color_correction(
+    optimizer: LiveJointOptimizer,
+    *,
+    target: np.ndarray,
+    strength: float,
+    softness: float,
+) -> float:
+    if optimizer.polygons.count == 0:
+        return 0.0
+
+    before_loss = float(optimizer.loss_history[-1])
+    before_colors = np.array(optimizer.polygons.colors, copy=True)
+    before_alphas = np.array(optimizer.polygons.alphas, copy=True)
+    before_canvas = np.array(optimizer.current_canvas, copy=True)
+    before_len = len(optimizer.loss_history)
+
+    residual = target - optimizer.current_canvas
+    centers = np.round(optimizer.polygons.centers).astype(np.int32)
+    centers[:, 0] = np.clip(centers[:, 0], 0, target.shape[1] - 1)
+    centers[:, 1] = np.clip(centers[:, 1], 0, target.shape[0] - 1)
+
+    correction = residual[centers[:, 1], centers[:, 0]]
+    optimizer.polygons.colors = np.clip(
+        optimizer.polygons.colors + float(strength) * correction,
+        0.0,
+        1.0,
+    ).astype(np.float32, copy=False)
+
+    optimizer.polygons.alphas = np.clip(
+        optimizer.polygons.alphas
+        + 0.12
+        * np.mean(np.abs(correction), axis=1, dtype=np.float32),
+        optimizer.config.min_alpha,
+        optimizer.config.max_alpha,
+    ).astype(np.float32, copy=False)
+
+    trial_loss = float(optimizer.step(float(max(softness, 0.05))))
+    if trial_loss > before_loss:
+        optimizer.polygons.colors = before_colors
+        optimizer.polygons.alphas = before_alphas
+        optimizer.current_canvas = before_canvas
+        del optimizer.loss_history[before_len:]
+        return 0.0
+
+    return float(before_loss - trial_loss)
+
+
 def _add_targeted_batch(
     optimizer: LiveJointOptimizer,
     *,
     target: np.ndarray,
     batch_size: int,
-    size_px: float,
-    alpha: float,
+    size_min_px: float,
+    size_max_px: float,
+    alpha_min: float,
+    alpha_max: float,
     high_frequency: bool,
+    rng: np.random.Generator,
 ) -> None:
     if batch_size <= 0:
         return
@@ -351,10 +385,23 @@ def _add_targeted_batch(
             (target - optimizer.current_canvas) ** 2, axis=2, dtype=np.float32
         )
 
-    radius = max(2, int(round(size_px * 0.8)))
+    radius = max(2, int(round(size_max_px * 0.8)))
     centers = _top_error_centers(err, k=batch_size, radius=radius)
+    if not centers:
+        return
 
-    for cx, cy in centers:
+    values = np.array([err[cy, cx] for cx, cy in centers], dtype=np.float32)
+    vmax = float(np.max(values)) if values.size else 1.0
+    vmin = float(np.min(values)) if values.size else 0.0
+    denom = max(vmax - vmin, 1e-6)
+
+    for idx, (cx, cy) in enumerate(centers):
+        score = float((values[idx] - vmin) / denom)
+        size_px = float(size_min_px + (size_max_px - size_min_px) * score)
+        alpha = float(alpha_min + (alpha_max - alpha_min) * score)
+        alpha = float(np.clip(alpha + rng.normal(0.0, 0.03), alpha_min, alpha_max))
+        size_px = float(max(size_min_px, min(size_max_px, size_px)))
+
         color_hint = _region_mean_color(
             target, cx, cy, max(2, int(round(size_px * 0.6)))
         )
@@ -365,8 +412,8 @@ def _add_targeted_batch(
             size_y=float(size_px),
             color=color_hint,
             alpha=float(alpha),
-            shape_type=SHAPE_QUAD,
-            rotation=0.0,
+            shape_type=SHAPE_ELLIPSE,
+            rotation=float(rng.uniform(-np.pi, np.pi)),
         )
 
 
@@ -533,27 +580,34 @@ def execute_phase7_schedule(
             or (hard_deadline is not None and now >= hard_deadline)
         )
 
+    rng = np.random.default_rng(random_seed)
+
     runtime_scale = 1.0
     if minutes > 0.0:
-        runtime_scale = float(np.clip((minutes * 60.0) / 300.0, 0.10, 2.0))
+        runtime_scale = float(np.clip((minutes * 60.0) / 240.0, 0.15, 1.80))
 
     def _scaled_count(value: int, *, minimum: int) -> int:
         if value <= 0:
             return 0
         return max(minimum, int(round(float(value) * runtime_scale)))
 
-    stage_a_steps = _scaled_count(int(plan.stage_a_steps), minimum=20)
+    stage_a_steps = _scaled_count(int(plan.stage_a_steps), minimum=120)
+    stage_a_color_steps = max(40, int(round(stage_a_steps * 0.75)))
+    stage_a_pos_steps = max(10, stage_a_steps - stage_a_color_steps)
+
     stage_b_batches = _scaled_count(int(plan.stage_b_batches), minimum=1)
-    stage_b_batch_size = _scaled_count(int(plan.stage_b_batch_size), minimum=1)
+    stage_b_batch_size = _scaled_count(int(plan.stage_b_batch_size), minimum=6)
     stage_b_steps_per_batch = _scaled_count(
-        int(plan.stage_b_steps_per_batch), minimum=12
+        int(plan.stage_b_steps_per_batch), minimum=60
     )
+
     stage_c_batches = _scaled_count(int(plan.stage_c_batches), minimum=1)
-    stage_c_batch_size = _scaled_count(int(plan.stage_c_batch_size), minimum=1)
+    stage_c_batch_size = _scaled_count(int(plan.stage_c_batch_size), minimum=6)
     stage_c_steps_per_batch = _scaled_count(
-        int(plan.stage_c_steps_per_batch), minimum=8
+        int(plan.stage_c_steps_per_batch), minimum=60
     )
-    stage_d_steps = _scaled_count(int(plan.stage_d_steps), minimum=40)
+
+    stage_d_steps = _scaled_count(int(plan.stage_d_steps), minimum=120)
 
     resolution_schedule = _progressive_resolutions(full_w)
 
@@ -571,19 +625,24 @@ def execute_phase7_schedule(
         polygons=_grid_initialized_batch(
             target_level,
             count=int(plan.stage_a_initial_polygons),
-            alpha=1.0,
+            alpha=0.90,
         ),
         config=LiveOptimizerConfig(
-            color_lr=0.03,
-            position_lr=0.004,
-            size_lr=0.001,
-            alpha_lr=0.0,
-            position_update_interval=100,
-            size_update_interval=500,
-            max_fd_polygons=30,
-            max_size_fd_polygons=20,
+            color_lr=0.05,
+            position_lr=0.50,
+            size_lr=0.30,
+            rotation_lr=0.02,
+            alpha_lr=0.01,
+            position_update_interval=20,
+            max_fd_polygons=40,
             render_chunk_size=50,
+            checkpoint_stride=10,
+            min_size=3.0,
+            max_size=60.0,
+            min_alpha=0.05,
+            max_alpha=0.98,
             allow_loss_increase=True,
+            use_lab_loss=True,
         ),
     )
 
@@ -677,9 +736,12 @@ def execute_phase7_schedule(
                 optimizer,
                 target=target_level,
                 batch_size=batch_size,
-                size_px=size_px,
-                alpha=0.45 if hf else 0.50,
+                size_min_px=(3.0 if hf else 8.0),
+                size_max_px=(10.0 if hf else 25.0),
+                alpha_min=(0.40 if hf else 0.55),
+                alpha_max=(0.60 if hf else 0.85),
                 high_frequency=hf,
+                rng=rng,
             )
             batch_markers.append(len(loss_history))
 
@@ -719,9 +781,9 @@ def execute_phase7_schedule(
             checkpoint_canvas = np.array(optimizer.current_canvas, copy=True)
 
             before_correction_len = len(optimizer.loss_history)
-            gain = apply_low_frequency_color_correction(
+            gain = _apply_residual_color_correction(
                 optimizer,
-                sigma=8.0,
+                target=target_level,
                 strength=0.55,
                 softness=float(np.clip(softness * 0.90, 0.01, 5.0)),
             )
@@ -734,9 +796,12 @@ def execute_phase7_schedule(
                 optimizer,
                 target=target_level,
                 batch_size=batch_size,
-                size_px=size_px,
-                alpha=0.38,
+                size_min_px=3.0,
+                size_max_px=max(4.0, size_px),
+                alpha_min=0.35,
+                alpha_max=0.60,
                 high_frequency=True,
+                rng=rng,
             )
             batch_markers.append(len(loss_history))
 
@@ -804,16 +869,35 @@ def execute_phase7_schedule(
     optimizer.config = replace(
         optimizer.config,
         position_update_interval=0,
-        size_update_interval=0,
-        max_fd_polygons=0,
+        max_fd_polygons=40,
     )
     _run_stage_steps(
         optimizer=optimizer,
         controls=controls,
         stage_name="A",
-        steps=int(stage_a_steps),
-        start_softness=0.42,
-        end_softness=0.06,
+        steps=int(stage_a_color_steps),
+        start_softness=3.0,
+        end_softness=1.2,
+        deadline_reached=_deadline_reached,
+        emit_update=_emit,
+        on_forced_actions=_on_forced_actions,
+        max_total_steps=max_total_steps,
+        loss_history=loss_history,
+    )
+
+    optimizer.config = replace(
+        optimizer.config,
+        color_lr=0.015,
+        position_update_interval=1,
+        max_fd_polygons=None,
+    )
+    _run_stage_steps(
+        optimizer=optimizer,
+        controls=controls,
+        stage_name="A",
+        steps=int(stage_a_pos_steps),
+        start_softness=1.2,
+        end_softness=0.8,
         deadline_reached=_deadline_reached,
         emit_update=_emit,
         on_forced_actions=_on_forced_actions,
@@ -838,10 +922,11 @@ def execute_phase7_schedule(
             break
 
         t = batch_idx / max(stage_b_batches - 1, 1)
-        size_px = float(
+        size_max = float(
             plan.stage_b_size_start
             + (plan.stage_b_size_end - plan.stage_b_size_start) * t
         )
+        size_min = max(8.0, size_max * 0.35)
 
         checkpoint_len = len(loss_history)
         checkpoint_loss = float(optimizer.loss_history[-1])
@@ -852,26 +937,47 @@ def execute_phase7_schedule(
             optimizer,
             target=target_level,
             batch_size=int(stage_b_batch_size),
-            size_px=size_px,
-            alpha=0.50,
+            size_min_px=float(size_min),
+            size_max_px=float(max(size_max, size_min + 0.5)),
+            alpha_min=0.55,
+            alpha_max=0.85,
             high_frequency=False,
+            rng=rng,
         )
         batch_markers.append(len(loss_history))
 
         optimizer.config = replace(
             optimizer.config,
-            position_update_interval=100,
-            size_update_interval=500,
-            max_fd_polygons=30,
-            max_size_fd_polygons=20,
+            color_lr=0.04,
+            position_update_interval=0,
+            max_fd_polygons=40,
         )
         _run_stage_steps(
             optimizer=optimizer,
             controls=controls,
             stage_name="B",
-            steps=int(stage_b_steps_per_batch),
-            start_softness=0.24,
-            end_softness=0.05,
+            steps=max(1, int(stage_b_steps_per_batch - 1)),
+            start_softness=1.1,
+            end_softness=0.45,
+            deadline_reached=_deadline_reached,
+            emit_update=_emit,
+            on_forced_actions=_on_forced_actions,
+            max_total_steps=max_total_steps,
+            loss_history=loss_history,
+        )
+
+        optimizer.config = replace(
+            optimizer.config,
+            position_update_interval=1,
+            max_fd_polygons=None,
+        )
+        _run_stage_steps(
+            optimizer=optimizer,
+            controls=controls,
+            stage_name="B",
+            steps=1,
+            start_softness=0.40,
+            end_softness=0.40,
             deadline_reached=_deadline_reached,
             emit_update=_emit,
             on_forced_actions=_on_forced_actions,
@@ -908,10 +1014,11 @@ def execute_phase7_schedule(
             break
 
         t = batch_idx / max(stage_c_batches - 1, 1)
-        size_px = float(
+        size_max = float(
             plan.stage_c_size_start
             + (plan.stage_c_size_end - plan.stage_c_size_start) * t
         )
+        size_min = max(3.0, size_max * 0.35)
 
         checkpoint_len = len(loss_history)
         checkpoint_loss = float(optimizer.loss_history[-1])
@@ -922,26 +1029,28 @@ def execute_phase7_schedule(
             optimizer,
             target=target_level,
             batch_size=int(stage_c_batch_size),
-            size_px=size_px,
-            alpha=0.40,
+            size_min_px=float(size_min),
+            size_max_px=float(max(size_max, size_min + 0.4)),
+            alpha_min=0.35,
+            alpha_max=0.60,
             high_frequency=True,
+            rng=rng,
         )
         batch_markers.append(len(loss_history))
 
         optimizer.config = replace(
             optimizer.config,
-            position_update_interval=100,
-            size_update_interval=500,
-            max_fd_polygons=30,
-            max_size_fd_polygons=20,
+            color_lr=0.03,
+            position_update_interval=0,
+            max_fd_polygons=40,
         )
         _run_stage_steps(
             optimizer=optimizer,
             controls=controls,
             stage_name="C",
             steps=int(stage_c_steps_per_batch),
-            start_softness=0.17,
-            end_softness=0.03,
+            start_softness=0.90,
+            end_softness=0.30,
             deadline_reached=_deadline_reached,
             emit_update=_emit,
             on_forced_actions=_on_forced_actions,
@@ -966,8 +1075,8 @@ def execute_phase7_schedule(
 
     optimizer.config = replace(
         optimizer.config,
-        position_update_interval=50,
-        size_update_interval=0,
+        color_lr=0.02,
+        position_update_interval=1,
         max_fd_polygons=None,
     )
     _run_stage_steps(
@@ -975,8 +1084,8 @@ def execute_phase7_schedule(
         controls=controls,
         stage_name="D",
         steps=int(stage_d_steps),
-        start_softness=0.12,
-        end_softness=0.02,
+        start_softness=0.70,
+        end_softness=0.22,
         deadline_reached=_deadline_reached,
         emit_update=_emit,
         on_forced_actions=_on_forced_actions,
