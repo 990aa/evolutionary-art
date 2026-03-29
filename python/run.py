@@ -64,7 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--update-interval-ms",
         type=int,
-        default=5000,
+        default=2000,
         help="Display refresh interval in milliseconds.",
     )
     parser.add_argument(
@@ -316,7 +316,7 @@ def main() -> int:
         )
     else:
         print("Launching staged single-optimizer live visualization...")
-        print("Controls: P pause, R screenshot, Q quit")
+        print("Controls: P/S/E/R/Q, 1/2/3, V, G, D, +/-")
         result = run_phase7_live_display(
             target_image=preprocessed.target_rgb,
             segmentation_map=preprocessed.segmentation_map,

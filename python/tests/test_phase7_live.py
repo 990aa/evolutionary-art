@@ -66,8 +66,87 @@ def test_phase7_plan_and_controls() -> None:
             screenshot_callback=screenshot,
             quit_callback=do_quit,
         )
-        == "noop"
+        == "view-set"
     )
+    assert controls.view_mode_index == 0
+
+    assert (
+        handle_phase7_control_key(
+            "v",
+            controls=controls,
+            screenshot_callback=screenshot,
+            quit_callback=do_quit,
+        )
+        == "view-cycle"
+    )
+    assert controls.view_mode_index == 1
+
+    assert (
+        handle_phase7_control_key(
+            "e",
+            controls=controls,
+            screenshot_callback=screenshot,
+            quit_callback=do_quit,
+        )
+        == "residual-mode"
+    )
+    assert controls.residual_mode_index == 1
+
+    assert (
+        handle_phase7_control_key(
+            "s",
+            controls=controls,
+            screenshot_callback=screenshot,
+            quit_callback=do_quit,
+        )
+        == "segmentation-toggle"
+    )
+    assert controls.show_segmentation_overlay
+
+    assert (
+        handle_phase7_control_key(
+            "g",
+            controls=controls,
+            screenshot_callback=screenshot,
+            quit_callback=do_quit,
+        )
+        == "force-growth"
+    )
+    assert controls.force_growth_requests == 1
+
+    assert (
+        handle_phase7_control_key(
+            "d",
+            controls=controls,
+            screenshot_callback=screenshot,
+            quit_callback=do_quit,
+        )
+        == "force-decompose"
+    )
+    assert controls.force_decompose_requests == 1
+
+    before_scale = controls.softness_scale
+    assert (
+        handle_phase7_control_key(
+            "+",
+            controls=controls,
+            screenshot_callback=screenshot,
+            quit_callback=do_quit,
+        )
+        == "softness-up"
+    )
+    assert controls.softness_scale > before_scale
+
+    assert (
+        handle_phase7_control_key(
+            "-",
+            controls=controls,
+            screenshot_callback=screenshot,
+            quit_callback=do_quit,
+        )
+        == "softness-down"
+    )
+    assert controls.softness_scale > 0.0
 
     assert (
         handle_phase7_control_key(
