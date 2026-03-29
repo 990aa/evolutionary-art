@@ -23,7 +23,12 @@ from PIL import Image
 from scipy.ndimage import gaussian_filter
 
 from src.live_optimizer import LiveJointOptimizer, LiveOptimizerConfig
-from src.live_renderer import SHAPE_ELLIPSE, SHAPE_QUAD, LivePolygonBatch, SoftRasterizer
+from src.live_renderer import (
+    SHAPE_ELLIPSE,
+    SHAPE_QUAD,
+    LivePolygonBatch,
+    SoftRasterizer,
+)
 from src.live_schedule import apply_low_frequency_color_correction
 
 
@@ -113,7 +118,11 @@ def build_phase7_plan(
     step_scale = float(np.clip(res_scale * (0.85 + 0.45 * complexity), 0.70, 2.20))
 
     b_size_start = float(
-        np.clip(18.0 * (base_resolution / 200.0) ** 0.35 * (1.10 - 0.30 * complexity), 8.0, 24.0)
+        np.clip(
+            18.0 * (base_resolution / 200.0) ** 0.35 * (1.10 - 0.30 * complexity),
+            8.0,
+            24.0,
+        )
     )
     b_size_end = max(4.0, b_size_start * 0.36)
     c_size_start = max(3.5, b_size_end)
@@ -159,7 +168,9 @@ def _resize_rgb(image: np.ndarray, *, width: int, height: int) -> np.ndarray:
     uint8 = np.clip(np.round(image * 255.0), 0, 255).astype(np.uint8)
     pil = Image.fromarray(uint8, mode="RGB")
     resized = pil.resize((width, height), Image.Resampling.LANCZOS)
-    return (np.asarray(resized, dtype=np.float32) / 255.0).astype(np.float32, copy=False)
+    return (np.asarray(resized, dtype=np.float32) / 255.0).astype(
+        np.float32, copy=False
+    )
 
 
 def _resize_labels(labels: np.ndarray, *, width: int, height: int) -> np.ndarray:
@@ -336,13 +347,17 @@ def _add_targeted_batch(
     if high_frequency:
         err = _high_frequency_error_map(target, optimizer.current_canvas)
     else:
-        err = np.mean((target - optimizer.current_canvas) ** 2, axis=2, dtype=np.float32)
+        err = np.mean(
+            (target - optimizer.current_canvas) ** 2, axis=2, dtype=np.float32
+        )
 
     radius = max(2, int(round(size_px * 0.8)))
     centers = _top_error_centers(err, k=batch_size, radius=radius)
 
     for cx, cy in centers:
-        color_hint = _region_mean_color(target, cx, cy, max(2, int(round(size_px * 0.6))))
+        color_hint = _region_mean_color(
+            target, cx, cy, max(2, int(round(size_px * 0.6)))
+        )
         optimizer.add_polygon(
             center_x=float(cx),
             center_y=float(cy),
@@ -417,10 +432,14 @@ def handle_phase7_control_key(
         return "force-decompose"
 
     if normalized in {"+", "=", "plus"}:
-        controls.softness_scale = float(np.clip(controls.softness_scale * 1.10, 0.35, 3.00))
+        controls.softness_scale = float(
+            np.clip(controls.softness_scale * 1.10, 0.35, 3.00)
+        )
         return "softness-up"
     if normalized in {"-", "_", "minus"}:
-        controls.softness_scale = float(np.clip(controls.softness_scale / 1.10, 0.35, 3.00))
+        controls.softness_scale = float(
+            np.clip(controls.softness_scale / 1.10, 0.35, 3.00)
+        )
         return "softness-down"
 
     return "noop"
@@ -448,7 +467,9 @@ def _run_stage_steps(
         if max_total_steps is not None and len(loss_history) >= max_total_steps:
             break
 
-        while controls.paused and not controls.quit_requested and not deadline_reached():
+        while (
+            controls.paused and not controls.quit_requested and not deadline_reached()
+        ):
             time.sleep(0.05)
 
         if controls.quit_requested or deadline_reached():
@@ -496,7 +517,9 @@ def execute_phase7_schedule(
     full_h, full_w = target_full.shape[:2]
 
     start_time = time.monotonic()
-    soft_deadline = start_time + max(0.0, float(minutes) * 60.0) if minutes > 0.0 else None
+    soft_deadline = (
+        start_time + max(0.0, float(minutes) * 60.0) if minutes > 0.0 else None
+    )
     hard_deadline = (
         start_time + float(hard_timeout_seconds)
         if hard_timeout_seconds is not None and hard_timeout_seconds > 0.0
@@ -522,10 +545,14 @@ def execute_phase7_schedule(
     stage_a_steps = _scaled_count(int(plan.stage_a_steps), minimum=20)
     stage_b_batches = _scaled_count(int(plan.stage_b_batches), minimum=1)
     stage_b_batch_size = _scaled_count(int(plan.stage_b_batch_size), minimum=1)
-    stage_b_steps_per_batch = _scaled_count(int(plan.stage_b_steps_per_batch), minimum=12)
+    stage_b_steps_per_batch = _scaled_count(
+        int(plan.stage_b_steps_per_batch), minimum=12
+    )
     stage_c_batches = _scaled_count(int(plan.stage_c_batches), minimum=1)
     stage_c_batch_size = _scaled_count(int(plan.stage_c_batch_size), minimum=1)
-    stage_c_steps_per_batch = _scaled_count(int(plan.stage_c_steps_per_batch), minimum=8)
+    stage_c_steps_per_batch = _scaled_count(
+        int(plan.stage_c_steps_per_batch), minimum=8
+    )
     stage_d_steps = _scaled_count(int(plan.stage_d_steps), minimum=40)
 
     resolution_schedule = _progressive_resolutions(full_w)
@@ -583,7 +610,9 @@ def execute_phase7_schedule(
             new_height=full_h,
         )
 
-    def _emit(stage_name: str, *, running: bool = True, status_override: str | None = None) -> None:
+    def _emit(
+        stage_name: str, *, running: bool = True, status_override: str | None = None
+    ) -> None:
         canvas = _display_canvas()
         loss = _rgb_mse(target_full, canvas)
         status = (
@@ -755,7 +784,9 @@ def execute_phase7_schedule(
 
         optimizer = LiveJointOptimizer(
             target_image=target_level,
-            rasterizer=SoftRasterizer(height=current_resolution, width=current_resolution),
+            rasterizer=SoftRasterizer(
+                height=current_resolution, width=current_resolution
+            ),
             polygons=scaled,
             config=replace(optimizer.config),
         )
@@ -790,7 +821,11 @@ def execute_phase7_schedule(
         loss_history=loss_history,
     )
 
-    if len(resolution_schedule) >= 2 and not controls.quit_requested and not _deadline_reached():
+    if (
+        len(resolution_schedule) >= 2
+        and not controls.quit_requested
+        and not _deadline_reached()
+    ):
         _transition_to_resolution(resolution_schedule[1], "B")
 
     if not controls.quit_requested and not _deadline_reached():
@@ -803,7 +838,10 @@ def execute_phase7_schedule(
             break
 
         t = batch_idx / max(stage_b_batches - 1, 1)
-        size_px = float(plan.stage_b_size_start + (plan.stage_b_size_end - plan.stage_b_size_start) * t)
+        size_px = float(
+            plan.stage_b_size_start
+            + (plan.stage_b_size_end - plan.stage_b_size_start) * t
+        )
 
         checkpoint_len = len(loss_history)
         checkpoint_loss = float(optimizer.loss_history[-1])
@@ -853,7 +891,11 @@ def execute_phase7_schedule(
                 batch_markers.pop()
             _emit("B")
 
-    if len(resolution_schedule) >= 3 and not controls.quit_requested and not _deadline_reached():
+    if (
+        len(resolution_schedule) >= 3
+        and not controls.quit_requested
+        and not _deadline_reached()
+    ):
         _transition_to_resolution(resolution_schedule[-1], "C")
 
     if not controls.quit_requested and not _deadline_reached():
@@ -866,7 +908,10 @@ def execute_phase7_schedule(
             break
 
         t = batch_idx / max(stage_c_batches - 1, 1)
-        size_px = float(plan.stage_c_size_start + (plan.stage_c_size_end - plan.stage_c_size_start) * t)
+        size_px = float(
+            plan.stage_c_size_start
+            + (plan.stage_c_size_end - plan.stage_c_size_start) * t
+        )
 
         checkpoint_len = len(loss_history)
         checkpoint_loss = float(optimizer.loss_history[-1])
@@ -1019,7 +1064,9 @@ def _segmentation_overlay_rgba(
     if segmentation_map is None:
         return None
 
-    seg = _resize_labels(segmentation_map.astype(np.int32, copy=False), width=width, height=height)
+    seg = _resize_labels(
+        segmentation_map.astype(np.int32, copy=False), width=width, height=height
+    )
     edges = np.zeros((height, width), dtype=bool)
     edges[:-1, :] |= seg[:-1, :] != seg[1:, :]
     edges[:, :-1] |= seg[:, :-1] != seg[:, 1:]
@@ -1087,7 +1134,9 @@ def _draw_outline_panel(
     else:
         draw_indices = np.arange(count, dtype=np.int32)
 
-    draw_sizes = np.maximum(sizes[draw_indices, 0], sizes[draw_indices, 1]).astype(np.float32)
+    draw_sizes = np.maximum(sizes[draw_indices, 0], sizes[draw_indices, 1]).astype(
+        np.float32
+    )
     if draw_sizes.size >= 3:
         q1, q2 = np.quantile(draw_sizes, [0.33, 0.66])
     elif draw_sizes.size == 2:
@@ -1326,11 +1375,15 @@ def run_phase7_live_display(
             ax_residual.imshow(abs_res, cmap="magma", vmin=0.0, vmax=1.0)
             ax_residual.set_title("Panel 3 - Absolute Residual")
         else:
-            ax_residual.imshow(np.clip(signed * signed, 0.0, 1.0), cmap="viridis", vmin=0.0, vmax=1.0)
+            ax_residual.imshow(
+                np.clip(signed * signed, 0.0, 1.0), cmap="viridis", vmin=0.0, vmax=1.0
+            )
             ax_residual.set_title("Panel 3 - Squared Residual")
 
         ax_poly.clear()
-        ax_poly.set_title("Panel 4 - Polygon Outlines (Blue/Large, Green/Medium, Red/Small)")
+        ax_poly.set_title(
+            "Panel 4 - Polygon Outlines (Blue/Large, Green/Medium, Red/Small)"
+        )
         _draw_outline_panel(
             ax_poly,
             centers=centers,
