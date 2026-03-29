@@ -148,7 +148,9 @@ def _grid_initialized_batch(
     cols = int(np.ceil(np.sqrt(count * w / max(h, 1))))
     rows = int(np.ceil(count / max(cols, 1)))
 
-    base_size = float((w / np.sqrt(max(count, 1))) * 1.5)
+    cell_w = max(1.0, float(w) / max(cols, 1))
+    cell_h = max(1.0, float(h) / max(rows, 1))
+    base_size = float(max(cell_w, cell_h) * 1.2)
 
     centers = np.zeros((count, 2), dtype=np.float32)
     sizes = np.zeros((count, 2), dtype=np.float32)
@@ -173,10 +175,14 @@ def _grid_initialized_batch(
 
             centers[idx] = np.array([cx, cy], dtype=np.float32)
             sizes[idx] = np.array([base_size, base_size], dtype=np.float32)
-            colors[idx] = np.array(
-                _region_mean_color(target, cx, cy, max(2, base_size // 2)),
-                dtype=np.float32,
-            )
+            patch = target[y0:y1, x0:x1]
+            if patch.size == 0:
+                colors[idx] = np.array(
+                    _region_mean_color(target, cx, cy, max(2, int(round(base_size * 0.5)))),
+                    dtype=np.float32,
+                )
+            else:
+                colors[idx] = patch.mean(axis=(0, 1), dtype=np.float32)
             idx += 1
 
     return LivePolygonBatch(
@@ -359,8 +365,25 @@ def execute_phase7_schedule(
     init_batch = _grid_initialized_batch(
         target,
         count=int(plan.stage_a_initial_polygons),
-        alpha=0.85,
+        alpha=1.0,
     )
+
+    # Preserve stage ordering while adapting work volume for shorter runtime budgets.
+    runtime_scale = 1.0
+    if minutes > 0.0:
+        runtime_scale = float(np.clip((minutes * 60.0) / 300.0, 0.10, 2.0))
+
+    def _scaled_count(value: int, *, minimum: int) -> int:
+        return max(minimum, int(round(float(value) * runtime_scale)))
+
+    stage_a_steps = _scaled_count(int(plan.stage_a_steps), minimum=20)
+    stage_b_batches = _scaled_count(int(plan.stage_b_batches), minimum=1)
+    stage_b_batch_size = _scaled_count(int(plan.stage_b_batch_size), minimum=1)
+    stage_b_steps_per_batch = _scaled_count(int(plan.stage_b_steps_per_batch), minimum=12)
+    stage_c_batches = _scaled_count(int(plan.stage_c_batches), minimum=1)
+    stage_c_batch_size = _scaled_count(int(plan.stage_c_batch_size), minimum=1)
+    stage_c_steps_per_batch = _scaled_count(int(plan.stage_c_steps_per_batch), minimum=8)
+    stage_d_steps = _scaled_count(int(plan.stage_d_steps), minimum=40)
 
     optimizer = LiveJointOptimizer(
         target_image=target,
@@ -424,7 +447,7 @@ def execute_phase7_schedule(
         optimizer=optimizer,
         controls=controls,
         stage_name="A",
-        steps=int(plan.stage_a_steps),
+        steps=int(stage_a_steps),
         start_softness=3.0,
         end_softness=1.0,
         deadline_reached=_deadline_reached,
@@ -437,13 +460,13 @@ def execute_phase7_schedule(
     # Stage B: targeted medium additions.
     if not controls.quit_requested and not _deadline_reached():
         stage_markers.append(("B", len(loss_history)))
-    for batch_idx in range(plan.stage_b_batches):
+    for batch_idx in range(stage_b_batches):
         if controls.quit_requested or _deadline_reached():
             break
         if max_total_steps is not None and len(loss_history) >= max_total_steps:
             break
 
-        t = batch_idx / max(plan.stage_b_batches - 1, 1)
+        t = batch_idx / max(stage_b_batches - 1, 1)
         size_px = float(
             plan.stage_b_size_start
             + (plan.stage_b_size_end - plan.stage_b_size_start) * t
@@ -451,9 +474,9 @@ def execute_phase7_schedule(
         _add_targeted_batch(
             optimizer,
             target=target,
-            batch_size=int(plan.stage_b_batch_size),
+            batch_size=int(stage_b_batch_size),
             size_px=size_px,
-            alpha=0.65,
+            alpha=0.80,
             high_frequency=False,
         )
         batch_markers.append(len(loss_history))
@@ -468,7 +491,7 @@ def execute_phase7_schedule(
             optimizer=optimizer,
             controls=controls,
             stage_name="B",
-            steps=int(plan.stage_b_steps_per_batch),
+            steps=int(stage_b_steps_per_batch),
             start_softness=1.2,
             end_softness=0.7,
             deadline_reached=_deadline_reached,
@@ -481,13 +504,13 @@ def execute_phase7_schedule(
     # Stage C: high-frequency detail additions.
     if not controls.quit_requested and not _deadline_reached():
         stage_markers.append(("C", len(loss_history)))
-    for batch_idx in range(plan.stage_c_batches):
+    for batch_idx in range(stage_c_batches):
         if controls.quit_requested or _deadline_reached():
             break
         if max_total_steps is not None and len(loss_history) >= max_total_steps:
             break
 
-        t = batch_idx / max(plan.stage_c_batches - 1, 1)
+        t = batch_idx / max(stage_c_batches - 1, 1)
         size_px = float(
             plan.stage_c_size_start
             + (plan.stage_c_size_end - plan.stage_c_size_start) * t
@@ -495,9 +518,9 @@ def execute_phase7_schedule(
         _add_targeted_batch(
             optimizer,
             target=target,
-            batch_size=int(plan.stage_c_batch_size),
+            batch_size=int(stage_c_batch_size),
             size_px=size_px,
-            alpha=0.60,
+            alpha=0.75,
             high_frequency=True,
         )
         batch_markers.append(len(loss_history))
@@ -512,7 +535,7 @@ def execute_phase7_schedule(
             optimizer=optimizer,
             controls=controls,
             stage_name="C",
-            steps=int(plan.stage_c_steps_per_batch),
+            steps=int(stage_c_steps_per_batch),
             start_softness=0.9,
             end_softness=0.45,
             deadline_reached=_deadline_reached,
@@ -535,7 +558,7 @@ def execute_phase7_schedule(
         optimizer=optimizer,
         controls=controls,
         stage_name="D",
-        steps=int(plan.stage_d_steps),
+        steps=int(stage_d_steps),
         start_softness=0.8,
         end_softness=0.3,
         deadline_reached=_deadline_reached,
