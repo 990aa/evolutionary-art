@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from skimage import color
 
 from src.live_renderer import (
     SHAPE_ELLIPSE,
@@ -83,7 +82,6 @@ class LiveJointOptimizer:
             )
 
         self.target = target
-        self.target_lab = color.rgb2lab(self.target).astype(np.float32, copy=False)
         self.rasterizer = rasterizer
         self.polygons = polygons
         self.config = LiveOptimizerConfig() if config is None else config
@@ -163,19 +161,9 @@ class LiveJointOptimizer:
         *,
         target_lab: np.ndarray | None = None,
     ) -> float:
-        if target_lab is not None:
-            lab_target = target_lab
-        elif target is not None:
-            lab_target = color.rgb2lab(np.clip(target, 0.0, 1.0)).astype(
-                np.float32, copy=False
-            )
-        else:
-            lab_target = self.target_lab
-
-        lab_canvas = color.rgb2lab(np.clip(canvas, 0.0, 1.0)).astype(
-            np.float32, copy=False
-        )
-        diff = lab_canvas - lab_target
+        del target_lab
+        ref = self.target if target is None else target
+        diff = np.clip(canvas, 0.0, 1.0) - np.clip(ref, 0.0, 1.0)
         return float(np.mean(diff * diff, dtype=np.float32))
 
     def _current_loss(self) -> float:
