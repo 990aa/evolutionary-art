@@ -72,6 +72,7 @@ class Phase7ControlState:
     view_mode_index: int = 0
     residual_mode_index: int = 0
     show_segmentation_overlay: bool = False
+    show_scatter_overlay: bool = True
     softness_scale: float = 1.0
     latest_softness: float = 0.12
 
@@ -89,6 +90,9 @@ class _SharedViewState:
     polygon_count: int
     iteration: int
     stage_name: str
+    stage_iteration: int
+    stage_start_loss: float
+    stage_position_updates: int
     running: bool
     status_line: str
     polygon_sizes: np.ndarray
@@ -143,7 +147,7 @@ def build_phase7_plan(
         stage_c_steps_per_batch=150,
         stage_c_size_start=float(c_size_start),
         stage_c_size_end=float(c_size_end),
-        stage_d_steps=500,
+        stage_d_steps=600,
     )
 
 
@@ -152,8 +156,7 @@ def _rgb_mse(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def _signed_residual(target: np.ndarray, canvas: np.ndarray) -> np.ndarray:
-    scalar = np.mean(target - canvas, axis=2, dtype=np.float32)
-    return np.clip(scalar, -1.0, 1.0).astype(np.float32, copy=False)
+    return np.clip(target - canvas, -1.0, 1.0).astype(np.float32, copy=False)
 
 
 def _abs_residual(target: np.ndarray, canvas: np.ndarray) -> np.ndarray:
@@ -700,6 +703,9 @@ def handle_phase7_control_key(
     if normalized == "s":
         controls.show_segmentation_overlay = not controls.show_segmentation_overlay
         return "segmentation-toggle"
+    if normalized == "x":
+        controls.show_scatter_overlay = not controls.show_scatter_overlay
+        return "scatter-toggle"
     if normalized == "e":
         controls.residual_mode_index = (controls.residual_mode_index + 1) % 3
         return "residual-mode"
@@ -747,6 +753,7 @@ def _run_stage_steps(
     loss_history: list[float],
     diagnostics_every: int | None = None,
     diagnostics_callback=None,
+    step_callback=None,
 ) -> int:
     executed = 0
 
@@ -786,6 +793,9 @@ def _run_stage_steps(
         loss = optimizer.step(softness)
         loss_history.append(float(loss))
         executed += 1
+
+        if step_callback is not None:
+            step_callback(stage_name, position_triggered)
 
         if (
             diagnostics_every is not None
@@ -869,7 +879,10 @@ def execute_phase7_schedule(
         int(plan.stage_c_steps_per_batch), minimum=60
     )
 
-    stage_d_steps = _scaled_count(int(plan.stage_d_steps), minimum=120)
+    if runtime_scale < 1.0:
+        stage_d_steps = _scaled_count(int(plan.stage_d_steps), minimum=120)
+    else:
+        stage_d_steps = int(max(120, int(plan.stage_d_steps)))
 
     resolution_schedule = _progressive_resolutions(full_w)
 
@@ -913,6 +926,9 @@ def execute_phase7_schedule(
     stage_markers: list[tuple[str, int]] = []
     batch_markers: list[int] = []
     resolution_markers: list[int] = [0]
+    stage_iteration = 0
+    stage_start_loss = float(loss_history[-1])
+    stage_position_updates = 0
 
     def _display_canvas() -> np.ndarray:
         canvas = np.array(optimizer.current_canvas, copy=True)
@@ -956,10 +972,30 @@ def execute_phase7_schedule(
             stage_name,
             len(loss_history),
             loss,
+            stage_iteration,
+            stage_start_loss,
+            stage_position_updates,
             running,
             status,
             list(stage_markers),
         )
+
+    def _begin_stage(stage_name: str) -> None:
+        nonlocal stage_iteration
+        nonlocal stage_start_loss
+        nonlocal stage_position_updates
+
+        stage_markers.append((stage_name, len(loss_history)))
+        stage_iteration = 0
+        stage_start_loss = float(optimizer.loss_history[-1])
+        stage_position_updates = 0
+
+    def _stage_step_callback(_stage_name: str, position_triggered: bool) -> None:
+        nonlocal stage_iteration
+        nonlocal stage_position_updates
+        stage_iteration += 1
+        if position_triggered:
+            stage_position_updates += 1
 
     def _shape_distribution_summary() -> str:
         if optimizer.polygons.count <= 0:
@@ -1155,7 +1191,7 @@ def execute_phase7_schedule(
             ),
         )
 
-    stage_markers.append(("A", len(loss_history)))
+    _begin_stage("A")
     optimizer.config = replace(
         optimizer.config,
         position_update_interval=0,
@@ -1176,6 +1212,7 @@ def execute_phase7_schedule(
         loss_history=loss_history,
         diagnostics_every=10,
         diagnostics_callback=_stage_diagnostics,
+        step_callback=_stage_step_callback,
     )
 
     optimizer.config = replace(
@@ -1199,6 +1236,7 @@ def execute_phase7_schedule(
         loss_history=loss_history,
         diagnostics_every=10,
         diagnostics_callback=_stage_diagnostics,
+        step_callback=_stage_step_callback,
     )
 
     if (
@@ -1209,7 +1247,7 @@ def execute_phase7_schedule(
         _transition_to_resolution(resolution_schedule[1], "B")
 
     if not controls.quit_requested and not _deadline_reached():
-        stage_markers.append(("B", len(loss_history)))
+        _begin_stage("B")
 
     for batch_idx in range(stage_b_batches):
         if controls.quit_requested or _deadline_reached():
@@ -1272,6 +1310,7 @@ def execute_phase7_schedule(
             on_forced_actions=_on_forced_actions,
             max_total_steps=max_total_steps,
             loss_history=loss_history,
+            step_callback=_stage_step_callback,
         )
 
         optimizer.config = replace(
@@ -1291,6 +1330,7 @@ def execute_phase7_schedule(
             on_forced_actions=_on_forced_actions,
             max_total_steps=max_total_steps,
             loss_history=loss_history,
+            step_callback=_stage_step_callback,
         )
 
         _nudge_recent_polygons_toward_error(
@@ -1311,6 +1351,7 @@ def execute_phase7_schedule(
             on_forced_actions=_on_forced_actions,
             max_total_steps=max_total_steps,
             loss_history=loss_history,
+            step_callback=_stage_step_callback,
         )
 
         if float(optimizer.loss_history[-1]) > checkpoint_loss:
@@ -1333,7 +1374,7 @@ def execute_phase7_schedule(
         _transition_to_resolution(resolution_schedule[-1], "C")
 
     if not controls.quit_requested and not _deadline_reached():
-        stage_markers.append(("C", len(loss_history)))
+        _begin_stage("C")
 
     for batch_idx in range(stage_c_batches):
         if controls.quit_requested or _deadline_reached():
@@ -1392,6 +1433,7 @@ def execute_phase7_schedule(
             on_forced_actions=_on_forced_actions,
             max_total_steps=max_total_steps,
             loss_history=loss_history,
+            step_callback=_stage_step_callback,
         )
 
         if batch_idx % 2 == 0:
@@ -1413,6 +1455,7 @@ def execute_phase7_schedule(
                 on_forced_actions=_on_forced_actions,
                 max_total_steps=max_total_steps,
                 loss_history=loss_history,
+                step_callback=_stage_step_callback,
             )
 
         if float(optimizer.loss_history[-1]) > checkpoint_loss:
@@ -1428,27 +1471,67 @@ def execute_phase7_schedule(
             _emit("C")
 
     if not controls.quit_requested and not _deadline_reached():
-        stage_markers.append(("D", len(loss_history)))
+        _begin_stage("D")
 
     optimizer.config = replace(
         optimizer.config,
-        color_lr=0.02,
+        color_lr=0.015,
+        position_lr=0.80,
         position_update_interval=1,
-        max_fd_polygons=40,
+        size_update_interval=1,
+        max_fd_polygons=None,
+        allow_loss_increase=False,
     )
-    _run_stage_steps(
-        optimizer=optimizer,
-        controls=controls,
-        stage_name="D",
-        steps=int(stage_d_steps),
-        start_softness=0.70,
-        end_softness=0.22,
-        deadline_reached=_deadline_reached,
-        emit_update=_emit,
-        on_forced_actions=_on_forced_actions,
-        max_total_steps=max_total_steps,
-        loss_history=loss_history,
-    )
+
+    softness_schedule = [1.5, 1.2, 0.9, 0.6, 0.4, 0.3]
+    stage_d_target_steps = int(max(1, stage_d_steps))
+    if stage_d_target_steps >= 600:
+        per_level = [100] * len(softness_schedule)
+    else:
+        base = stage_d_target_steps // len(softness_schedule)
+        rem = stage_d_target_steps % len(softness_schedule)
+        per_level = [base + (1 if i < rem else 0) for i in range(len(softness_schedule))]
+
+    stage_d_executed = 0
+
+    for softness_level, segment_steps in zip(softness_schedule, per_level, strict=True):
+        if segment_steps <= 0:
+            continue
+        if controls.quit_requested or _deadline_reached():
+            break
+        if max_total_steps is not None and len(loss_history) >= max_total_steps:
+            break
+
+        done = _run_stage_steps(
+            optimizer=optimizer,
+            controls=controls,
+            stage_name="D",
+            steps=int(segment_steps),
+            start_softness=float(softness_level),
+            end_softness=float(softness_level),
+            deadline_reached=_deadline_reached,
+            emit_update=_emit,
+            on_forced_actions=_on_forced_actions,
+            max_total_steps=max_total_steps,
+            loss_history=loss_history,
+            step_callback=_stage_step_callback,
+        )
+        stage_d_executed += int(done)
+
+        if stage_d_executed < 200:
+            window = min(40, max(8, stage_d_executed // 2))
+            if len(loss_history) >= window + 1:
+                prev = float(loss_history[-(window + 1)])
+                curr = float(loss_history[-1])
+                rel_improvement = (prev - curr) / max(abs(prev), 1e-8)
+                if rel_improvement < 1e-4:
+                    _emit(
+                        "D",
+                        status_override=(
+                            f"stage D converged early at step {stage_d_executed}"
+                        ),
+                    )
+                    break
 
     final_canvas = _display_canvas()
     final_rgb_mse = _rgb_mse(target_full, final_canvas)
@@ -1463,6 +1546,9 @@ def execute_phase7_schedule(
         "done",
         len(loss_history),
         final_rgb_mse,
+        stage_iteration,
+        stage_start_loss,
+        stage_position_updates,
         False,
         "complete",
         list(stage_markers),
@@ -1503,6 +1589,9 @@ def run_phase7_headless(
         _stage_name: str,
         _iteration: int,
         _loss: float,
+        _stage_iteration: int,
+        _stage_start_loss: float,
+        _stage_position_updates: int,
         _running: bool,
         _status: str,
         _stage_markers: list[tuple[str, int]],
@@ -1649,6 +1738,36 @@ def _draw_outline_panel(
         ax.add_patch(patch)
 
 
+def _draw_shape_scatter_overlay(
+    ax,
+    *,
+    centers: np.ndarray,
+    sizes: np.ndarray,
+    shape_types: np.ndarray,
+) -> None:
+    if centers.size == 0:
+        return
+
+    major = np.maximum(sizes[:, 0], sizes[:, 1]).astype(np.float32, copy=False)
+    marker_sizes = np.clip(major * 1.8, 6.0, 45.0)
+
+    color_map = np.empty((centers.shape[0], 4), dtype=np.float32)
+    color_map[:] = np.array([0.30, 0.30, 0.30, 0.80], dtype=np.float32)
+    color_map[shape_types == SHAPE_ELLIPSE] = np.array([0.15, 0.47, 0.85, 0.80], dtype=np.float32)
+    color_map[shape_types == SHAPE_TRIANGLE] = np.array([0.80, 0.18, 0.22, 0.80], dtype=np.float32)
+    color_map[shape_types == SHAPE_QUAD] = np.array([0.18, 0.62, 0.24, 0.80], dtype=np.float32)
+
+    ax.scatter(
+        centers[:, 0],
+        centers[:, 1],
+        s=marker_sizes,
+        c=color_map,
+        marker="o",
+        linewidths=0.25,
+        edgecolors="white",
+    )
+
+
 def run_phase7_live_display(
     *,
     target_image: np.ndarray,
@@ -1677,6 +1796,9 @@ def run_phase7_live_display(
         polygon_count=0,
         iteration=0,
         stage_name="init",
+        stage_iteration=0,
+        stage_start_loss=_rgb_mse(target, blank),
+        stage_position_updates=0,
         running=True,
         status_line="initializing",
         polygon_sizes=np.zeros((0, 2), dtype=np.float32),
@@ -1701,6 +1823,9 @@ def run_phase7_live_display(
         stage_name: str,
         iteration: int,
         _loss: float,
+        stage_iteration: int,
+        stage_start_loss: float,
+        stage_position_updates: int,
         running: bool,
         status: str,
         stage_markers: list[tuple[str, int]],
@@ -1717,6 +1842,9 @@ def run_phase7_live_display(
             shared.polygon_count = int(polygons.count)
             shared.iteration = int(iteration)
             shared.stage_name = str(stage_name)
+            shared.stage_iteration = int(stage_iteration)
+            shared.stage_start_loss = float(stage_start_loss)
+            shared.stage_position_updates = int(stage_position_updates)
             shared.running = bool(running)
             shared.status_line = str(status)
             shared.polygon_sizes = sizes
@@ -1794,6 +1922,9 @@ def run_phase7_live_display(
             batch_markers = list(shared.batch_markers)
             stage_name = str(shared.stage_name)
             iteration = int(shared.iteration)
+            stage_iteration = int(shared.stage_iteration)
+            stage_start_loss = float(shared.stage_start_loss)
+            stage_position_updates = int(shared.stage_position_updates)
             polygon_count = int(shared.polygon_count)
             running = bool(shared.running)
             status = str(shared.status_line)
@@ -1807,6 +1938,10 @@ def run_phase7_live_display(
             softness = float(controls.latest_softness)
             softness_scale = float(controls.softness_scale)
             show_seg = bool(controls.show_segmentation_overlay)
+            show_scatter = bool(controls.show_scatter_overlay)
+
+        signed_scalar = np.mean(signed, axis=2, dtype=np.float32)
+        signed_display = np.clip(0.5 * signed_scalar + 0.5, 0.0, 1.0)
 
         ax_focus.clear()
         ax_focus.set_xticks([])
@@ -1816,8 +1951,15 @@ def run_phase7_live_display(
             ax_focus.set_title("Panel 2 - Current Reconstruction")
             if show_seg and seg_overlay is not None:
                 ax_focus.imshow(seg_overlay)
+            if show_scatter:
+                _draw_shape_scatter_overlay(
+                    ax_focus,
+                    centers=centers,
+                    sizes=sizes,
+                    shape_types=shape_types,
+                )
         elif view_mode == 1:
-            ax_focus.imshow(signed, cmap="coolwarm", vmin=-1.0, vmax=1.0)
+            ax_focus.imshow(signed_display, cmap="RdBu_r", vmin=0.0, vmax=1.0)
             ax_focus.set_title("Panel 2 - Focus View: Signed Residual")
         else:
             ax_focus.set_title("Panel 2 - Focus View: Polygon Outlines")
@@ -1835,7 +1977,7 @@ def run_phase7_live_display(
         ax_residual.set_xticks([])
         ax_residual.set_yticks([])
         if residual_mode == 0:
-            ax_residual.imshow(signed, cmap="coolwarm", vmin=-1.0, vmax=1.0)
+            ax_residual.imshow(signed_display, cmap="RdBu_r", vmin=0.0, vmax=1.0)
             ax_residual.set_title("Panel 3 - Signed Residual")
         elif residual_mode == 1:
             ax_residual.imshow(abs_res, cmap="magma", vmin=0.0, vmax=1.0)
@@ -1859,6 +2001,13 @@ def run_phase7_live_display(
             width=w,
             height=h,
         )
+        if show_scatter:
+            _draw_shape_scatter_overlay(
+                ax_poly,
+                centers=centers,
+                sizes=sizes,
+                shape_types=shape_types,
+            )
 
         ax_curve.clear()
         ax_curve.set_title("Panel 5 - Log MSE vs Iteration")
@@ -1914,15 +2063,32 @@ def run_phase7_live_display(
 
             ax_curve.legend(loc="upper right")
 
+        curr_loss = float(losses[-1]) if losses.size else float("nan")
+        stage_delta = max(stage_start_loss - curr_loss, 0.0) if losses.size else 0.0
+        stage_pct = (
+            100.0 * stage_delta / max(abs(stage_start_loss), 1e-9)
+            if losses.size
+            else 0.0
+        )
+        e_count = int(np.count_nonzero(shape_types == SHAPE_ELLIPSE))
+        t_count = int(np.count_nonzero(shape_types == SHAPE_TRIANGLE))
+        q_count = int(np.count_nonzero(shape_types == SHAPE_QUAD))
+
         stat_lines = [
-            f"stage: {stage_name}",
-            f"iteration: {iteration}",
-            f"polygons: {polygon_count}",
-            f"mse: {losses[-1]:.6f}" if losses.size else "mse: n/a",
-            f"paused: {paused}",
-            f"softness: {softness:.4f} (scale {softness_scale:.2f})",
+            "STAGE PROGRESS",
+            f"stage: {stage_name} | iter in stage: {stage_iteration}",
+            (
+                f"stage loss: {stage_start_loss:.6f} -> {curr_loss:.6f} "
+                f"({stage_pct:.2f}% better)"
+                if losses.size
+                else "stage loss: n/a"
+            ),
+            f"shape counts: ellipse={e_count} triangle={t_count} quad={q_count}",
+            f"position updates (stage): {stage_position_updates}",
+            f"total iter: {iteration} | polygons: {polygon_count}",
+            f"paused: {paused} | softness: {softness:.4f} (x{softness_scale:.2f})",
             f"state: {status}",
-            "keys: P/S/E/R/Q | 1/2/3/V | G/D | +/-",
+            "keys: P/S/E/R/Q | 1/2/3/V | G/D | +/- | X(scatter)",
         ]
         ax_curve.text(
             0.01,

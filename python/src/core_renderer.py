@@ -304,22 +304,25 @@ class CoreRenderer:
         cov = self.coverage_batch(polygons, softness=softness, chunk_size=chunk_size)
 
         canvas = np.ones((self.height, self.width, 3), dtype=np.float32)
-        trans = np.ones((self.height, self.width), dtype=np.float32)
 
         effective_alpha = np.zeros((n, self.height, self.width), dtype=np.float32)
-        weights = np.zeros((n, self.height, self.width), dtype=np.float32)
         trans_after = np.zeros((n, self.height, self.width), dtype=np.float32)
 
         for idx in range(n):
             ea = cov[idx] * float(np.clip(polygons.alphas[idx], 0.0, 1.0))
             effective_alpha[idx] = ea
-            weights[idx] = ea * trans
 
+        trans_suffix = np.ones((self.height, self.width), dtype=np.float32)
+        for idx in range(n - 1, -1, -1):
+            trans_after[idx] = trans_suffix
+            trans_suffix = trans_suffix * (1.0 - effective_alpha[idx])
+
+        weights = effective_alpha * trans_after
+
+        for idx in range(n):
+            ea = effective_alpha[idx]
             color = polygons.colors[idx][None, None, :]
             canvas = canvas * (1.0 - ea[:, :, None]) + color * ea[:, :, None]
-
-            trans = trans * (1.0 - ea)
-            trans_after[idx] = trans
 
         return SoftRenderResult(
             canvas=canvas.astype(np.float32, copy=False),
@@ -347,6 +350,8 @@ class CoreRenderer:
 
         grad_colors: np.ndarray | None = None
         grad_alphas: np.ndarray | None = None
+        effective_alpha = np.zeros((n, self.height, self.width), dtype=np.float32)
+
         if compute_gradients:
             if target is None:
                 raise ValueError("target is required when compute_gradients=True")
@@ -369,14 +374,12 @@ class CoreRenderer:
 
                 canvas_before = canvas
                 ea = cov * alpha
+                effective_alpha[idx] = ea
                 canvas = canvas_before * (1.0 - ea[:, :, None]) + color * ea[:, :, None]
 
-                if compute_gradients and target is not None and grad_colors is not None and grad_alphas is not None:
+                if compute_gradients and target is not None and grad_alphas is not None:
                     residual = canvas - target
                     scale = 2.0 / float(target.size)
-                    grad_colors[idx] = (
-                        scale * alpha * np.sum(cov[:, :, None] * residual, axis=(0, 1), dtype=np.float32)
-                    )
                     grad_alphas[idx] = float(
                         scale
                         * np.sum(
@@ -389,6 +392,20 @@ class CoreRenderer:
 
                 if (idx + 1) % max(1, int(checkpoint_stride)) == 0 or (idx + 1) == n:
                     checkpoints[idx + 1] = np.array(canvas, copy=True)
+
+        if compute_gradients and target is not None and grad_colors is not None:
+            residual_final = canvas - target
+            trans_after = np.zeros_like(effective_alpha)
+            trans_suffix = np.ones((self.height, self.width), dtype=np.float32)
+            for idx in range(n - 1, -1, -1):
+                trans_after[idx] = trans_suffix
+                trans_suffix = trans_suffix * (1.0 - effective_alpha[idx])
+
+            weights = trans_after * effective_alpha
+            grad_colors[:] = (
+                (2.0 / float(target.size))
+                * np.einsum("nhw,hwc->nc", weights, residual_final, dtype=np.float32)
+            ).astype(np.float32, copy=False)
 
         return ForwardPassResult(
             canvas=canvas.astype(np.float32, copy=False),
