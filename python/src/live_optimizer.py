@@ -393,9 +393,13 @@ class LiveJointOptimizer:
             self.config.max_alpha,
         ).astype(np.float32, copy=False)
 
-        run_geometry = self.config.position_update_interval > 0 and (
+        run_position = self.config.position_update_interval > 0 and (
             self.step_count % self.config.position_update_interval == 0
         )
+        run_size = self.config.size_update_interval > 0 and (
+            self.step_count % self.config.size_update_interval == 0
+        )
+        run_geometry = run_position or run_size
         if run_geometry and self.polygons.count > 0:
             fd_indices = self._select_fd_indices(baseline_canvas)
             pos_grad, size_grad, rot_grad = self._fd_geometry_grads(
