@@ -223,6 +223,9 @@ def build_phase7_plan(
 
     rounds: list[Phase7RoundConfig] = []
     for idx, (resolution, count) in enumerate(zip(unique_levels, counts, strict=False)):
+        resolution_scale = (200.0 / max(float(resolution), 1.0)) ** 2
+        step_scale = float(np.clip(resolution_scale**0.6, 0.20, 1.20))
+
         typical_batch = int(
             np.clip(round((10.0 - 4.0 * complexity) * (1.0 + 0.15 * idx)), 2, 24)
         )
@@ -241,9 +244,15 @@ def build_phase7_plan(
                 min_size=float(min_size),
                 max_size=float(max_size),
                 max_steps_per_cycle=int(
-                    np.clip(round(18.0 + 34.0 * complexity - 2.0 * idx), 8, 48)
+                    np.clip(
+                        round((18.0 + 34.0 * complexity - 2.0 * idx) * step_scale),
+                        3,
+                        48,
+                    )
                 ),
-                post_add_steps=int(np.clip(round(4.0 + 8.0 * complexity), 2, 14)),
+                post_add_steps=int(
+                    np.clip(round((4.0 + 8.0 * complexity) * step_scale), 1, 14)
+                ),
                 start_softness=float(max(0.7, 2.2 - 0.35 * idx)),
                 end_softness=float(max(0.25, 0.70 - 0.10 * idx)),
             )

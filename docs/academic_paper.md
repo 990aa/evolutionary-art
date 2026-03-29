@@ -77,6 +77,13 @@ A naive baseline and the proposed progressive system were run under matched budg
 ### 4.3 Metrics
 Primary metric: terminal RGB mean squared error (MSE). Secondary qualitative evidence: residual directionality maps, outline evolution, and quality-vs-budget curves.
 
+For final-quality evaluation at high resolution, we additionally report:
+1. RMSE, where $\mathrm{RMSE}=\sqrt{\mathrm{MSE}}$.
+2. PSNR in dB, where $\mathrm{PSNR}=10\log_{10}(1/\mathrm{MSE})$ for normalized images.
+3. SSIM (structural similarity index).
+4. Reconstruction accuracy percentage, defined as $\max(0,1-\mathrm{MSE})\times 100$.
+5. Pixel-match rate at 5% per-channel tolerance.
+
 ## 5. Results
 ### 5.1 Baseline vs Proposed Method
 | Target Type | Naive Final MSE | Proposed Final MSE | Absolute Improvement |
@@ -100,6 +107,32 @@ These runs confirm that the timeout-safe scheduler can maintain meaningful desce
 
 ### 5.3 Qualitative Behavior
 The signed residual panel reveals directional correction needs unavailable in scalar heatmaps. The polygon-outline panel shows that growth batches are structurally coherent: large primitives settle global composition first, then medium/small primitives refine local detail. Vertical event markers on log-loss plots align with expected sawtooth transitions during growth stages.
+
+### 5.4 Final High-Resolution Reconstructions (500x500)
+To produce final reconstructions as close to each target as possible in this study configuration, each image was optimized with the same high-capacity setting:
+1. Resolution: 500x500.
+2. Polygon budget: 1000.
+3. Runtime budget: 5 minutes (hard timeout at 345 seconds).
+
+| Target Type | Iterations | Accepted Polygons | MSE | RMSE | PSNR (dB) | SSIM | Accuracy (%) | Pixel Match <= 5% (%) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Portrait | 471 | 119 | 0.1815 | 0.4260 | 7.41 | 0.2534 | 81.85 | 11.11 |
+| Landscape | 331 | 104 | 0.0650 | 0.2550 | 11.87 | 0.8080 | 93.50 | 38.37 |
+| Graphic | 661 | 252 | 0.1287 | 0.3587 | 8.91 | 0.5148 | 87.13 | 25.39 |
+
+These final runs show the strongest quantitative fidelity on the landscape image (highest SSIM and accuracy), while portrait and graphic images remain more challenging under polygon-limited representation due to smooth facial gradients and sharp high-contrast stylized boundaries, respectively.
+
+Final reconstruction artifacts:
+1. Portrait target: [docs/figures/internet_portrait_phase7_target_500.png](docs/figures/internet_portrait_phase7_target_500.png)
+2. Portrait reconstruction: [docs/figures/internet_portrait_phase7_reconstruction_500.png](docs/figures/internet_portrait_phase7_reconstruction_500.png)
+3. Portrait absolute error: [docs/figures/internet_portrait_phase7_abs_error_500.png](docs/figures/internet_portrait_phase7_abs_error_500.png)
+4. Landscape target: [docs/figures/internet_landscape_phase7_target_500.png](docs/figures/internet_landscape_phase7_target_500.png)
+5. Landscape reconstruction: [docs/figures/internet_landscape_phase7_reconstruction_500.png](docs/figures/internet_landscape_phase7_reconstruction_500.png)
+6. Landscape absolute error: [docs/figures/internet_landscape_phase7_abs_error_500.png](docs/figures/internet_landscape_phase7_abs_error_500.png)
+7. Graphic target: [docs/figures/internet_graphic_phase7_target_500.png](docs/figures/internet_graphic_phase7_target_500.png)
+8. Graphic reconstruction: [docs/figures/internet_graphic_phase7_reconstruction_500.png](docs/figures/internet_graphic_phase7_reconstruction_500.png)
+9. Graphic absolute error: [docs/figures/internet_graphic_phase7_abs_error_500.png](docs/figures/internet_graphic_phase7_abs_error_500.png)
+10. Full metric export: [docs/figures/phase7_final_reconstruction_metrics.json](docs/figures/phase7_final_reconstruction_metrics.json)
 
 ## 6. Discussion
 The combined effect of complexity-adaptive scheduling, progressive growth, and hard-timeout throttling yields practical and reliable optimization for arbitrary images. Unlike naive fixed-resolution evolution, the method prevents excessive early commitment to fine-scale noise and remains interactive under presentation constraints.
