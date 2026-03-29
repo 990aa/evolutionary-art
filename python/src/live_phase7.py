@@ -400,7 +400,7 @@ def _clustered_error_centers(
     n_clusters = int(max(1, min(k, coords.shape[0])))
     if n_clusters == coords.shape[0]:
         order = np.argsort(weights)[::-1]
-        ranked = [(int(coords[i, 0]), int(coords[i, 1])) for i in order]
+        ranked_points = [(int(coords[i, 0]), int(coords[i, 1])) for i in order]
     else:
         seed = int(rng.integers(0, 2**31 - 1))
         model = MiniBatchKMeans(
@@ -414,25 +414,25 @@ def _clustered_error_centers(
         except TypeError:
             labels = model.fit_predict(coords)
 
-        ranked: list[tuple[int, int, float]] = []
+        ranked_weighted: list[tuple[int, int, float]] = []
         for cluster_id in range(n_clusters):
             members = np.where(labels == cluster_id)[0]
             if members.size == 0:
                 continue
             best_local = members[int(np.argmax(weights[members]))]
-            ranked.append(
+            ranked_weighted.append(
                 (
                     int(coords[best_local, 0]),
                     int(coords[best_local, 1]),
                     float(weights[best_local]),
                 )
             )
-        ranked.sort(key=lambda item: item[2], reverse=True)
-        ranked = [(x, y) for x, y, _ in ranked]
+        ranked_weighted.sort(key=lambda item: item[2], reverse=True)
+        ranked_points = [(x, y) for x, y, _ in ranked_weighted]
 
     selected: list[tuple[int, int]] = []
     radius = int(max(1, suppression_radius))
-    for cx, cy in ranked:
+    for cx, cy in ranked_points:
         if len(selected) >= k:
             break
         if any((abs(cx - sx) <= radius and abs(cy - sy) <= radius) for sx, sy in selected):
@@ -845,16 +845,17 @@ def execute_phase7_schedule(
 
     runtime_scale = 1.0
     if minutes > 0.0:
-        runtime_scale = float(np.clip((minutes * 60.0) / 240.0, 0.15, 1.80))
+        runtime_scale = float(np.clip((minutes * 60.0) / 240.0, 0.08, 1.80))
 
     def _scaled_count(value: int, *, minimum: int) -> int:
         if value <= 0:
             return 0
         return max(minimum, int(round(float(value) * runtime_scale)))
 
-    stage_a_steps = _scaled_count(int(plan.stage_a_steps), minimum=40)
-    stage_a_color_steps = max(40, int(round(stage_a_steps * 0.75)))
-    stage_a_pos_steps = max(10, stage_a_steps - stage_a_color_steps)
+    stage_a_steps = _scaled_count(int(plan.stage_a_steps), minimum=24)
+    stage_a_steps = max(16, int(round(stage_a_steps * 0.55)))
+    stage_a_pos_steps = max(6, int(round(stage_a_steps * 0.20)))
+    stage_a_color_steps = max(12, stage_a_steps - stage_a_pos_steps)
 
     stage_b_batches = _scaled_count(int(plan.stage_b_batches), minimum=1)
     stage_b_batch_size = _scaled_count(int(plan.stage_b_batch_size), minimum=6)
@@ -1158,8 +1159,8 @@ def execute_phase7_schedule(
     optimizer.config = replace(
         optimizer.config,
         position_update_interval=0,
-        size_update_interval=1,
-        max_fd_polygons=40,
+        size_update_interval=0,
+        max_fd_polygons=12,
     )
     _run_stage_steps(
         optimizer=optimizer,
@@ -1181,8 +1182,8 @@ def execute_phase7_schedule(
         optimizer.config,
         color_lr=0.015,
         position_update_interval=1,
-        size_update_interval=1,
-        max_fd_polygons=20,
+        size_update_interval=0,
+        max_fd_polygons=10,
     )
     _run_stage_steps(
         optimizer=optimizer,
