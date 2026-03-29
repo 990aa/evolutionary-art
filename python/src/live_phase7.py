@@ -398,7 +398,7 @@ def execute_phase7_schedule(
         rasterizer=SoftRasterizer(height=h, width=w),
         polygons=init_batch,
         config=LiveOptimizerConfig(
-            color_lr=0.08,
+            color_lr=0.03,
             position_lr=0.004,
             size_lr=0.001,
             alpha_lr=0.0,
@@ -407,7 +407,7 @@ def execute_phase7_schedule(
             max_fd_polygons=30,
             max_size_fd_polygons=20,
             render_chunk_size=50,
-            allow_loss_increase=False,
+            allow_loss_increase=True,
         ),
     )
 
