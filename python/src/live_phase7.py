@@ -104,8 +104,8 @@ def build_phase7_plan(
     b_total = int(round(np.clip(0.30 * budget, 64.0, 96.0)))
     c_total = max(40, budget - a_count - b_total)
 
-    b_batches = max(1, int(np.ceil(b_total / 20.0)))
-    c_batches = max(1, int(np.ceil(c_total / 15.0)))
+    b_batches = 8
+    c_batches = 12
 
     b_size_start = 25.0
     b_size_end = 8.0
@@ -591,7 +591,7 @@ def execute_phase7_schedule(
             return 0
         return max(minimum, int(round(float(value) * runtime_scale)))
 
-    stage_a_steps = _scaled_count(int(plan.stage_a_steps), minimum=120)
+    stage_a_steps = _scaled_count(int(plan.stage_a_steps), minimum=40)
     stage_a_color_steps = max(40, int(round(stage_a_steps * 0.75)))
     stage_a_pos_steps = max(10, stage_a_steps - stage_a_color_steps)
 
