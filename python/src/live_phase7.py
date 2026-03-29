@@ -576,9 +576,11 @@ def execute_phase7_schedule(
                     f"round {round_idx + 1}/{len(plan.rounds)} initialized",
                 )
         else:
+            if previous_resolution is None:
+                raise RuntimeError("previous_resolution missing during round scaling")
             polygons = _scale_polygons(
                 polygons,
-                old_resolution=int(previous_resolution),
+                old_resolution=previous_resolution,
                 new_resolution=round_cfg.resolution,
             )
 

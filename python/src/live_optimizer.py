@@ -624,7 +624,11 @@ class LiveJointOptimizer:
             residual_map = np.sum((self.target - self.current_canvas) ** 2, axis=2)
             max_index = int(np.argmax(residual_map))
             y, x = divmod(max_index, self.rasterizer.width)
-            color = tuple(float(v) for v in self.target[y, x])
+            color = (
+                float(self.target[y, x, 0]),
+                float(self.target[y, x, 1]),
+                float(self.target[y, x, 2]),
+            )
 
             self.add_polygon(
                 center_x=float(x),
