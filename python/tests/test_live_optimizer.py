@@ -178,7 +178,7 @@ def test_step_rolls_back_geometry_without_reverting_color() -> None:
     ) -> float:
         value = float(base_loss_fn(canvas, target))
         if not np.allclose(optimizer.polygons.centers, start_centers, atol=1e-6):
-            return value + 5.0
+            return value + 1e6
         return value
 
     optimizer._loss = _geometry_penalized_loss  # type: ignore[method-assign]

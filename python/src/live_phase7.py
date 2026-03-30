@@ -798,9 +798,9 @@ def execute_phase7_schedule(
         return max(minimum, int(round(float(value) * runtime_scale)))
 
     stage_a_steps = _scaled_count(int(plan.stage_a_steps), minimum=24)
-    stage_a_steps = max(16, int(round(stage_a_steps * 0.55)))
-    stage_a_pos_steps = max(6, int(round(stage_a_steps * 0.20)))
-    stage_a_color_steps = max(12, stage_a_steps - stage_a_pos_steps)
+    stage_a_steps = max(10, int(round(stage_a_steps * 0.25)))
+    stage_a_pos_steps = max(4, int(round(stage_a_steps * 0.25)))
+    stage_a_color_steps = max(6, stage_a_steps - stage_a_pos_steps)
 
     stage_b_batches = _scaled_count(int(plan.stage_b_batches), minimum=1)
     stage_b_batch_size = _scaled_count(int(plan.stage_b_batch_size), minimum=6)
