@@ -3,9 +3,10 @@ from pathlib import Path
 import numpy as np
 
 from src.live_optimizer import LiveJointOptimizer, LiveOptimizerConfig
-from src.live_renderer import SoftRasterizer
+from src.live_renderer import SHAPE_ELLIPSE, SoftRasterizer
 from src.live_schedule import (
     load_square_target,
+    make_grid_seeded_batch,
     make_random_live_batch_with_bounds,
     run_multi_resolution_schedule,
 )
@@ -81,3 +82,35 @@ def test_phase4_multi_resolution_schedule_beats_single_resolution() -> None:
     )
 
     assert round_3.loss_end < baseline_optimizer.loss_history[-1]
+
+
+def test_grid_seeded_batch_uses_cell_means_and_fixed_geometry() -> None:
+    h = w = 50
+    yy, xx = np.meshgrid(
+        np.arange(h, dtype=np.float32),
+        np.arange(w, dtype=np.float32),
+        indexing="ij",
+    )
+    target = np.stack(
+        [
+            xx / float(max(w - 1, 1)),
+            yy / float(max(h - 1, 1)),
+            0.25 * np.ones_like(xx),
+        ],
+        axis=2,
+    ).astype(np.float32)
+
+    batch = make_grid_seeded_batch(target=target, count=24, alpha=0.85)
+
+    assert batch.count == 24
+    assert np.all(batch.shape_types == SHAPE_ELLIPSE)
+    assert np.allclose(batch.rotations, 0.0)
+    assert np.allclose(batch.alphas, 0.85)
+
+    assert np.unique(batch.centers[:, 0]).size == 5
+    assert np.unique(batch.centers[:, 1]).size == 5
+    assert np.allclose(batch.sizes[:, 0], 7.5)
+    assert np.allclose(batch.sizes[:, 1], 7.5)
+
+    expected_first = target[0:10, 0:10].mean(axis=(0, 1), dtype=np.float32)
+    assert np.allclose(batch.colors[0], expected_first, atol=1e-6)
