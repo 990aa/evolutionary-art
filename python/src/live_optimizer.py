@@ -201,14 +201,12 @@ class LiveJointOptimizer:
         softness: float,
         checkpoints: dict[int, np.ndarray],
         indices: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray]:
         pos_grad = np.zeros_like(self.polygons.centers, dtype=np.float32)
         size_grad = np.zeros_like(self.polygons.sizes, dtype=np.float32)
-        rot_grad = np.zeros_like(self.polygons.rotations, dtype=np.float32)
 
         eps_pos = float(max(self.config.position_eps_px, 0.25))
         eps_size_base = float(max(self.config.size_eps_px, 0.25))
-        eps_rot = float(max(self.config.rotation_eps_rad, 0.01))
 
         max_size = self._max_size()
 
@@ -292,30 +290,12 @@ class LiveJointOptimizer:
                 rotation=rot,
             )
 
-            r_plus = self._candidate_loss(
-                index=i,
-                softness=softness,
-                checkpoints=checkpoints,
-                center=(cx, cy),
-                size=(sx, sy),
-                rotation=rot + eps_rot,
-            )
-            r_minus = self._candidate_loss(
-                index=i,
-                softness=softness,
-                checkpoints=checkpoints,
-                center=(cx, cy),
-                size=(sx, sy),
-                rotation=rot - eps_rot,
-            )
-
             pos_grad[i, 0] = (x_plus - x_minus) / (2.0 * eps_pos)
             pos_grad[i, 1] = (y_plus - y_minus) / (2.0 * eps_pos)
             size_grad[i, 0] = (sx_plus - sx_minus) / (2.0 * eps_size)
             size_grad[i, 1] = (sy_plus - sy_minus) / (2.0 * eps_size)
-            rot_grad[i] = (r_plus - r_minus) / (2.0 * eps_rot)
 
-        return pos_grad, size_grad, rot_grad
+        return pos_grad, size_grad
 
     def set_polygons(
         self,
@@ -370,9 +350,6 @@ class LiveJointOptimizer:
         baseline_canvas = baseline_state.canvas
         baseline_loss = self._loss(baseline_canvas)
 
-        old_centers = np.array(self.polygons.centers, copy=True)
-        old_sizes = np.array(self.polygons.sizes, copy=True)
-        old_rotations = np.array(self.polygons.rotations, copy=True)
         old_colors = np.array(self.polygons.colors, copy=True)
         old_alphas = np.array(self.polygons.alphas, copy=True)
 
@@ -393,6 +370,17 @@ class LiveJointOptimizer:
             self.config.max_alpha,
         ).astype(np.float32, copy=False)
 
+        color_state = self._forward(float(softness), compute_gradients=False)
+        color_canvas = color_state.canvas
+        color_loss = self._loss(color_canvas)
+
+        if (not self.config.allow_loss_increase) and color_loss > baseline_loss:
+            self.polygons.colors = old_colors
+            self.polygons.alphas = old_alphas
+            color_canvas = baseline_canvas
+            color_loss = float(baseline_loss)
+            color_state = baseline_state
+
         run_position = self.config.position_update_interval > 0 and (
             self.step_count % self.config.position_update_interval == 0
         )
@@ -400,60 +388,65 @@ class LiveJointOptimizer:
             self.step_count % self.config.size_update_interval == 0
         )
         run_geometry = run_position or run_size
+
+        final_canvas = color_canvas
+        final_loss = float(color_loss)
+
         if run_geometry and self.polygons.count > 0:
-            fd_indices = self._select_fd_indices(baseline_canvas)
-            pos_grad, size_grad, rot_grad = self._fd_geometry_grads(
+            old_centers = np.array(self.polygons.centers, copy=True)
+            old_sizes = np.array(self.polygons.sizes, copy=True)
+            old_rotations = np.array(self.polygons.rotations, copy=True)
+
+            fd_indices = self._select_fd_indices(color_canvas)
+            pos_grad, size_grad = self._fd_geometry_grads(
                 softness=float(softness),
-                checkpoints=baseline_state.checkpoints,
+                checkpoints=color_state.checkpoints,
                 indices=fd_indices,
             )
 
-            self.polygons.centers = (
-                self.polygons.centers
-                - self._position_adam.step(pos_grad, self.config.position_lr)
-            ).astype(np.float32, copy=False)
-            self.polygons.centers[:, 0] = np.clip(
-                self.polygons.centers[:, 0],
-                0.0,
-                self.rasterizer.width - 1.0,
-            )
-            self.polygons.centers[:, 1] = np.clip(
-                self.polygons.centers[:, 1],
-                0.0,
-                self.rasterizer.height - 1.0,
-            )
+            if run_position:
+                self.polygons.centers = (
+                    self.polygons.centers
+                    - self._position_adam.step(pos_grad, self.config.position_lr)
+                ).astype(np.float32, copy=False)
+                self.polygons.centers[:, 0] = np.clip(
+                    self.polygons.centers[:, 0],
+                    0.0,
+                    self.rasterizer.width - 1.0,
+                )
+                self.polygons.centers[:, 1] = np.clip(
+                    self.polygons.centers[:, 1],
+                    0.0,
+                    self.rasterizer.height - 1.0,
+                )
 
-            max_size = self._max_size()
-            self.polygons.sizes = np.clip(
-                self.polygons.sizes - self._size_adam.step(size_grad, self.config.size_lr),
-                self.config.min_size,
-                max_size,
-            ).astype(np.float32, copy=False)
+            if run_size:
+                max_size = self._max_size()
+                self.polygons.sizes = np.clip(
+                    self.polygons.sizes
+                    - self._size_adam.step(size_grad, self.config.size_lr),
+                    self.config.min_size,
+                    max_size,
+                ).astype(np.float32, copy=False)
 
-            self.polygons.rotations = (
-                self.polygons.rotations
-                - self._rotation_adam.step(rot_grad, self.config.rotation_lr)
-            ).astype(np.float32, copy=False)
+            geometry_state = self._forward(float(softness), compute_gradients=False)
+            geometry_canvas = geometry_state.canvas
+            geometry_loss = self._loss(geometry_canvas)
 
-        updated_state = self._forward(float(softness), compute_gradients=False)
-        updated_canvas = updated_state.canvas
-        updated_loss = self._loss(updated_canvas)
+            if (not self.config.allow_loss_increase) and geometry_loss > color_loss:
+                self.polygons.centers = old_centers
+                self.polygons.sizes = old_sizes
+                self.polygons.rotations = old_rotations
+                final_canvas = color_canvas
+                final_loss = float(color_loss)
+            else:
+                final_canvas = geometry_canvas
+                final_loss = float(geometry_loss)
 
-        if (not self.config.allow_loss_increase) and updated_loss > baseline_loss:
-            self.polygons.centers = old_centers
-            self.polygons.sizes = old_sizes
-            self.polygons.rotations = old_rotations
-            self.polygons.colors = old_colors
-            self.polygons.alphas = old_alphas
-            self.current_canvas = baseline_canvas
-            self.loss_history.append(float(baseline_loss))
-            self.step_count += 1
-            return float(baseline_loss)
-
-        self.current_canvas = updated_canvas
-        self.loss_history.append(float(updated_loss))
+        self.current_canvas = final_canvas
+        self.loss_history.append(float(final_loss))
         self.step_count += 1
-        return float(updated_loss)
+        return float(final_loss)
 
     def run(
         self,
