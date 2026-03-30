@@ -832,13 +832,16 @@ def execute_phase7_schedule(
     current_resolution = int(resolution_schedule[0])
     target_level = _target_at_resolution(current_resolution)
     structure_guidance = _build_structure_guidance(target_level)
+    initial_seed_count = int(plan.stage_a_initial_polygons)
+    if current_resolution <= 50:
+        initial_seed_count = min(initial_seed_count, 24)
 
     optimizer = LiveJointOptimizer(
         target_image=target_level,
         rasterizer=SoftRasterizer(height=current_resolution, width=current_resolution),
         polygons=make_grid_seeded_batch(
             target=target_level,
-            count=int(plan.stage_a_initial_polygons),
+            count=initial_seed_count,
             alpha=0.85,
         ),
         config=LiveOptimizerConfig(

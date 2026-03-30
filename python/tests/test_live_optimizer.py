@@ -47,6 +47,9 @@ def test_joint_optimizer_color_and_position_converge_on_simple_rectangle() -> No
             position_lr=0.03,
             size_lr=0.002,
             alpha_lr=0.0,
+            position_update_interval=1,
+            size_update_interval=3,
+            max_fd_polygons=None,
             position_eps_px=2.0,
             size_eps_ratio=0.10,
             exact_fd=True,
@@ -167,6 +170,18 @@ def test_step_rolls_back_geometry_without_reverting_color() -> None:
     start_loss = float(optimizer.loss_history[-1])
     start_centers = np.array(optimizer.polygons.centers, copy=True)
     start_colors = np.array(optimizer.polygons.colors, copy=True)
+
+    base_loss_fn = optimizer._loss
+
+    def _geometry_penalized_loss(
+        canvas: np.ndarray, target: np.ndarray | None = None
+    ) -> float:
+        value = float(base_loss_fn(canvas, target))
+        if not np.allclose(optimizer.polygons.centers, start_centers, atol=1e-6):
+            return value + 5.0
+        return value
+
+    optimizer._loss = _geometry_penalized_loss  # type: ignore[method-assign]
 
     def _forced_bad_geometry(
         *, softness: float, checkpoints: dict[int, np.ndarray], indices: np.ndarray

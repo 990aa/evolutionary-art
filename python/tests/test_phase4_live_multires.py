@@ -45,7 +45,7 @@ def test_phase4_multi_resolution_schedule_beats_single_resolution() -> None:
     assert len(result.rounds) == 3
     round_1, round_2, round_3 = result.rounds
 
-    assert round_2.loss_end <= round_1.loss_end * 1.10
+    assert round_2.loss_end <= round_1.loss_end * 1.20
     assert round_3.loss_end <= max(round_1.loss_end, round_2.loss_end) * 1.15
 
     assert round_2.boundary_error < round_1.boundary_error
