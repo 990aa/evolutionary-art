@@ -8,7 +8,7 @@ import numpy as np
 from PIL import Image
 from skimage.metrics import structural_similarity
 
-from src.live_phase7 import build_phase7_plan, run_phase7_headless
+from src.live_refiner import build_phase7_plan, run_phase7_headless
 from src.preprocessing import preprocess_target_array
 
 
@@ -125,9 +125,9 @@ def main() -> int:
         abs_err = absolute_error_map(target, recon)
 
         stem = image_name.rsplit(".", 1)[0]
-        target_file = docs_figures / f"{stem}_phase7_target_500.png"
-        recon_file = docs_figures / f"{stem}_phase7_reconstruction_500.png"
-        err_file = docs_figures / f"{stem}_phase7_abs_error_500.png"
+        target_file = docs_figures / f"{stem}_refiner_target_500.png"
+        recon_file = docs_figures / f"{stem}_refiner_reconstruction_500.png"
+        err_file = docs_figures / f"{stem}_refiner_abs_error_500.png"
 
         save_rgb_image(target_file, target)
         save_rgb_image(recon_file, recon)
@@ -170,7 +170,7 @@ def main() -> int:
         "results": [asdict(item) for item in metrics],
     }
 
-    out_json = docs_figures / "phase7_final_reconstruction_metrics.json"
+    out_json = docs_figures / "refiner_final_reconstruction_metrics.json"
     out_json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     print(json.dumps(payload, indent=2))
     print(f"Saved metrics: {out_json}")

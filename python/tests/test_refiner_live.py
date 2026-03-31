@@ -8,7 +8,7 @@ import sys
 import numpy as np
 from PIL import Image
 
-from src.live_phase7 import (
+from src.live_refiner import (
     Phase7ControlState,
     build_phase7_plan,
     handle_phase7_control_key,

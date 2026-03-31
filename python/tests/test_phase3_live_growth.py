@@ -7,7 +7,7 @@ import numpy as np
 from PIL import Image
 from skimage import color
 
-from src.live_phase7 import build_phase7_plan, run_phase7_headless
+from src.live_refiner import build_phase7_plan, run_phase7_headless
 from src.preprocessing import preprocess_target_array
 
 

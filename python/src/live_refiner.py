@@ -979,7 +979,7 @@ def _execute_phase7_round_schedule(
             min_alpha=0.05,
             max_alpha=0.98,
             allow_loss_increase=False,
-            use_lab_loss=True,
+            use_lab_loss=False,
         )
 
     current_resolution = int(round_specs[0]["resolution"])
@@ -1526,7 +1526,7 @@ def execute_phase7_schedule(
         if stage_name != "A":
             return
         print(
-            "[phase7:A]"
+            "[refiner:A]"
             f" step={executed_steps:04d}"
             f" softness={softness:.4f}"
             f" pos_trigger={'yes' if position_triggered else 'no '}"
@@ -2426,7 +2426,7 @@ def run_phase7_live_display(
         out_dir = Path("outputs")
         out_dir.mkdir(parents=True, exist_ok=True)
         ts = time.strftime("%Y%m%d_%H%M%S")
-        out = out_dir / f"phase7_single_{ts}.png"
+        out = out_dir / f"refiner_single_{ts}.png"
         fig.savefig(out, dpi=170, bbox_inches="tight")
         return out
 

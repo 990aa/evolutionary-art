@@ -11,7 +11,7 @@ import numpy as np
 from PIL import Image
 from skimage.metrics import structural_similarity
 
-from src.live_phase7 import (
+from src.live_refiner import (
     build_phase7_plan,
     run_phase7_headless,
     run_phase7_live_display,

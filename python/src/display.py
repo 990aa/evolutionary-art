@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from src.live_phase7 import Phase7ControlState, run_phase7_live_display
+from src.live_refiner import Phase7ControlState, run_phase7_live_display
 
 
 @dataclass

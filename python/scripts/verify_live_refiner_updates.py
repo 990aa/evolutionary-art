@@ -25,7 +25,7 @@ def main() -> int:
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
 
-    from src.live_phase7 import (
+    from src.live_refiner import (
         Phase7ControlState,
         build_phase7_plan,
         execute_phase7_schedule,
