@@ -19,6 +19,7 @@ import numpy as np
 from matplotlib.animation import FuncAnimation
 from PIL import Image
 from scipy.ndimage import gaussian_filter, sobel, uniform_filter
+from skimage import color as skcolor
 
 from src.core_renderer import (
     SHAPE_ELLIPSE,
@@ -91,13 +92,19 @@ def build_phase7_plan(
     budget = max(1, int(polygon_budget))
     _ = float(complexity_score)
 
-    stage_a_count = min(50, budget)
-    stage_b_count = min(100, max(0, budget - stage_a_count))
-    stage_c_count = max(0, budget - stage_a_count - stage_b_count)
+    stage_a_count = min(budget, max(1, int(round(0.40 * budget))))
+    stage_b_count = min(
+        max(0, budget - stage_a_count),
+        max(1, int(round(0.40 * budget))),
+    )
+    remaining = max(0, budget - stage_a_count - stage_b_count)
+    stage_c_count = remaining // 2
+    stage_d_count = remaining - stage_c_count
 
     stage_a_res = max(24, min(50, int(base_resolution)))
     stage_b_res = max(stage_a_res, min(100, int(base_resolution)))
     stage_c_res = int(base_resolution)
+    stage_d_res = int(base_resolution)
 
     stages = (
         SequentialStageConfig(
@@ -108,10 +115,10 @@ def build_phase7_plan(
             mutation_steps=100,
             size_min=max(1.0, stage_a_res * 0.03),
             size_max=max(3.0, stage_a_res * 0.20),
-            alpha_min=0.06,
-            alpha_max=0.20,
+            alpha_min=0.60,
+            alpha_max=0.95,
             softness=0.55,
-            allowed_shapes=(SHAPE_ELLIPSE,),
+            allowed_shapes=(SHAPE_ELLIPSE, SHAPE_QUAD),
             high_frequency_only=False,
             top_k_regions=50,
             region_window=5,
@@ -127,8 +134,8 @@ def build_phase7_plan(
             mutation_steps=100,
             size_min=max(1.0, stage_b_res * 0.02),
             size_max=max(3.0, stage_b_res * 0.10),
-            alpha_min=0.05,
-            alpha_max=0.18,
+            alpha_min=0.35,
+            alpha_max=0.60,
             softness=0.18,
             allowed_shapes=(SHAPE_ELLIPSE, SHAPE_TRIANGLE),
             high_frequency_only=False,
@@ -146,10 +153,29 @@ def build_phase7_plan(
             mutation_steps=100,
             size_min=1.0,
             size_max=3.0,
-            alpha_min=0.05,
-            alpha_max=0.15,
+            alpha_min=0.10,
+            alpha_max=0.35,
             softness=0.035,
             allowed_shapes=(SHAPE_ELLIPSE, SHAPE_TRIANGLE, SHAPE_THIN_STROKE),
+            high_frequency_only=True,
+            top_k_regions=50,
+            region_window=5,
+            mutation_shift_px=1.0,
+            mutation_size_ratio=0.10,
+            mutation_rotation_deg=5.0,
+        ),
+        SequentialStageConfig(
+            name="polish",
+            resolution=stage_d_res,
+            shapes_to_add=stage_d_count,
+            candidate_count=50,
+            mutation_steps=100,
+            size_min=1.0,
+            size_max=3.0,
+            alpha_min=0.10,
+            alpha_max=0.35,
+            softness=0.028,
+            allowed_shapes=(SHAPE_ELLIPSE, SHAPE_THIN_STROKE),
             high_frequency_only=True,
             top_k_regions=50,
             region_window=5,
@@ -250,11 +276,15 @@ def _guide_map(
     high_frequency_only: bool,
 ) -> np.ndarray:
     del high_frequency_only
-    residual = np.mean(np.abs(target - canvas), axis=2, dtype=np.float32)
-    weighted = residual * np.clip(edge_map.astype(np.float32, copy=False), 0.0, 1.0)
-    if float(np.max(weighted)) <= 1e-8:
-        return residual.astype(np.float32, copy=False)
-    return weighted.astype(np.float32, copy=False)
+    target_lab = skcolor.rgb2lab(np.clip(target, 0.0, 1.0)).astype(np.float32, copy=False)
+    canvas_lab = skcolor.rgb2lab(np.clip(canvas, 0.0, 1.0)).astype(np.float32, copy=False)
+    lab_residual = np.mean(np.abs(target_lab - canvas_lab), axis=2, dtype=np.float32)
+    lab_scale = max(float(np.percentile(lab_residual, 99.0)), 1e-6)
+    lab_residual = np.clip(lab_residual / lab_scale, 0.0, 1.0).astype(
+        np.float32, copy=False
+    )
+    structure = np.clip(edge_map.astype(np.float32, copy=False), 0.0, 1.0)
+    return (0.7 * lab_residual + 0.3 * structure).astype(np.float32, copy=False)
 
 
 def _annealed_size_bounds(
