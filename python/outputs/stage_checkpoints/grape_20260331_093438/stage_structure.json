@@ -1,6 +1,6 @@
 {
   "stage": "structure",
-  "image_path": "outputs/stage_checkpoints/grape_20260331_092728/stage_structure.png",
+  "image_path": "outputs/stage_checkpoints/grape_20260331_093438/stage_structure.png",
   "resolution": 100.0,
   "accepted_shapes": 145.0,
   "stage_loss": 0.024484900757670403,

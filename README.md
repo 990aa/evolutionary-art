@@ -1,152 +1,121 @@
 # Attention-Guided Evolutionary Art
 
 ## Overview
-This repository reconstructs target images with ordered alpha-blended geometric primitives. The active live reconstruction module is now [python/src/live_refiner.py](C:\Users\ahada\Documents\abdulahad\evolutionary-art\python\src\live_refiner.py).
+This project reconstructs a target image with explicit geometric primitives instead of latent generative sampling. The current best code path is a sequential greedy painter implemented in [python/src/live_refiner.py](C:\Users\ahada\Documents\abdulahad\evolutionary-art\python\src\live_refiner.py) and [python/src/live_optimizer.py](C:\Users\ahada\Documents\abdulahad\evolutionary-art\python\src\live_optimizer.py).
 
-The current implementation includes:
-- A two-pass live optimizer with separate appearance and geometry rollback.
-- Grid-seeded initialization for the coarse round.
-- A fixed four-round live refiner schedule at 50, 100, and 200 resolution.
-- Diverse high-error region sampling for polygon insertion.
-- Structure-guided aspect ratios and thin-stroke support.
-- Round-to-round palette refinement in LAB space.
-- A live display path plus a headless execution path.
-- Hard runtime limits and a `<30s remaining` switch to final-only optimization.
+The live system now works by adding one shape at a time:
+- score many candidate shapes in the highest-error regions
+- solve each candidate color analytically from the target pixels it covers
+- hill-climb only the winning shape geometry
+- commit that single shape permanently to the canvas
 
-## Current Status
-The code paths above are implemented and tested, but the 5-minute reconstruction quality is still limited by the cost of finite-difference geometry updates.
+That is the best-performing implementation currently in the repository.
 
-The latest measured 5-minute `grape.jpg` run at `200x200` produced:
-- `rgb_mse = 0.07396`
-- `ssim = 0.15606`
-- `psnr = 11.31 dB`
-- `gradient_mse = 0.01458`
-- `gradient_corr = -0.02610`
-- `polygon_count = 32`
-- stage coverage: only round `A` completed under the 5-minute cap on this machine
+## Best Verified Result
+The current kept 5-minute verification run is:
+- target: `python/targets/grape.jpg`
+- resolution: `200x200`
+- runtime: `5 minutes`
+- run id: `grape_20260331_093438`
 
-Output artifacts from that run:
-- Image: [python/outputs/refiner_eval/grape_refiner_5min.png](C:\Users\ahada\Documents\abdulahad\evolutionary-art\python\outputs\refiner_eval\grape_refiner_5min.png)
-- Metrics: [python/outputs/refiner_eval/grape_refiner_5min_metrics.json](C:\Users\ahada\Documents\abdulahad\evolutionary-art\python\outputs\refiner_eval\grape_refiner_5min_metrics.json)
+Measured final metrics:
+- `rgb_mse = 0.020303`
+- `ssim = 0.45878`
+- `psnr = 16.924 dB`
+- `lab_mse = 110.403`
+- `gradient_mse = 0.00761`
+- `gradient_mae = 0.05647`
+- `gradient_corr = 0.59014`
+- `accepted_polygons = 295`
 
-That means the pipeline is functional, but it is not yet producing a high-fidelity 5-minute reconstruction on the grape target.
+Current kept artifacts:
+- Image: [stage_detail.png](C:\Users\ahada\Documents\abdulahad\evolutionary-art\python\outputs\stage_checkpoints\grape_20260331_093438\stage_detail.png)
+- Metrics: [run_metrics.json](C:\Users\ahada\Documents\abdulahad\evolutionary-art\python\outputs\stage_checkpoints\grape_20260331_093438\run_metrics.json)
 
-## Python Setup
+![Best reconstruction](C:\Users\ahada\Documents\abdulahad\evolutionary-art\python\outputs\stage_checkpoints\grape_20260331_093438\stage_detail.png)
+
+Historical note:
+During development on March 31, 2026, this same restored three-stage sequential variant previously reached a better one-off `rgb_mse` of about `0.01948`. The currently kept rerun from the restored code is `0.02030`, and that is the artifact still present in the workspace.
+
+## Current Algorithm
+The restored best variant uses three stages:
+
+1. Foundation at `50x50`
+   - `50` shapes
+   - large ellipses and quads
+   - `candidate_count=42`
+   - `mutation_steps=84`
+2. Structure at `100x100`
+   - `100` shapes
+   - ellipses, quads, and triangles
+   - `candidate_count=56`
+   - `mutation_steps=112`
+3. Detail at `200x200`
+   - remaining shapes
+   - ellipses, triangles, and thin strokes
+   - `candidate_count=72`
+   - `mutation_steps=156`
+
+Important implementation details:
+- routing uses absolute residual, with high-frequency emphasis only in the detail pass
+- shape colors are solved analytically, not by learning rates
+- geometry is refined by mutation-based hill climbing, not finite-difference gradients
+- the canvas starts from the target mean color, not a random or white field
+
+## Setup
 Requirements:
-- Python 3.12+
+- Python `3.14+`
 - `uv`
-- Node.js with `npx.cmd` available if you want to generate repomix snapshots
-
-Setup:
+- Node.js if you want repomix snapshots
 
 ```powershell
 Set-Location python
 uv sync
 ```
 
-## Main Run Commands
-Live window:
+## Main Commands
+Run the live UI:
 
 ```powershell
 Set-Location python
-uv run python run.py .\targets\grape.jpg --minutes 5 --resolution 200
+uv run python .\run.py .\targets\grape.jpg --minutes 5 --resolution 200
 ```
 
-Headless run:
+Run headless:
 
 ```powershell
 Set-Location python
-uv run python run.py .\targets\grape.jpg --no-display --minutes 5 --resolution 200
+uv run python .\run.py .\targets\grape.jpg --no-display --minutes 5 --resolution 200
 ```
 
-Final evaluation helper:
-
-```powershell
-Set-Location python
-uv run python final_reconstruct_eval.py
-```
-
-## Current Live Refiner Behavior
-The live refiner currently does the following:
-
-1. Round A at `50x50`
-   - starts from `24` grid-seeded ellipses
-   - adds batches of `8`
-   - uses `position_lr=0.8`, `size_lr=0.3`, `color_lr=0.05`
-2. Round B at `100x100`
-   - scales the current polygons
-   - adds batches of `6`
-   - uses `position_lr=0.6`, `size_lr=0.2`, `color_lr=0.04`
-3. Round C at `200x200`
-   - scales the current polygons
-   - adds batches of `5`
-   - uses `position_lr=0.4`, `size_lr=0.15`, `color_lr=0.03`
-4. Round D at `200x200`
-   - stays at full working resolution
-   - adds batches of `3`
-   - uses `position_lr=0.2`, `size_lr=0.08`, `color_lr=0.02`
-
-Optimizer details:
-- appearance updates and geometry updates are evaluated separately
-- color gradients use `trans_after * effective_alpha`
-- geometry updates use finite differences with rollback only for geometry
-- palette refinement blends `70%` local LAB target color with `30%` current polygon color between rounds
-
-## Display and Controls
-The live UI still exposes the existing control surface from the refiner module:
-- `P`: pause/resume
-- `R`: save screenshot
-- `Q`: quit
-- `S`: segmentation overlay toggle
-- `E`: residual view mode cycle
-- `V`: focus view cycle
-- `1`, `2`, `3`: direct focus view selection
-- `+`, `-`: softness scaling
-- `G`, `D`: force-growth / force-decomposition requests
-
-## Testing
-Compile:
-
-```powershell
-Set-Location python
-uv run python -m compileall .\src .\tests .\scripts .\run.py .\final_reconstruct_eval.py
-```
-
-Focused tests used during the recent refiner update:
-
-```powershell
-Set-Location python
-$env:PYTHONPATH = (Get-Location).Path
-uv run pytest .\tests\test_live_optimizer.py .\tests\test_refiner_live.py -q
-```
-
-## Repomix Snapshot
-Reusable repomix generator:
+Repomix snapshot:
 
 ```powershell
 Set-Location python
 uv run python .\scripts\build_python_repomix.py
 ```
 
-That script creates [python/python_repomix.xml](C:\Users\ahada\Documents\abdulahad\evolutionary-art\python\python_repomix.xml) for the `python/` folder while excluding:
-- all cache folders
-- `.venv`
-- `targets`
-- `outputs`
-- `scripts`
-- `tests`
-- `uv.lock`
-- `.python-version`
+## Testing
+Compile:
 
-Included files currently come from:
-- top-level Python files such as `run.py`, `final_reconstruct_eval.py`, `compare.py`, `demo.py`, and `pyproject.toml`
-- everything under `python/src/`
+```powershell
+Set-Location python
+$env:PYTHONPATH = (Get-Location).Path
+uv run python -m compileall .\src .\tests .\run.py .\final_reconstruct_eval.py .\scripts\build_python_repomix.py
+```
 
-The script also verifies that the generated XML paths exactly match that manifest and fails if any missing or unexpected file is present.
+Regression suite:
 
-## Repository Layout
-- [python/src/live_refiner.py](C:\Users\ahada\Documents\abdulahad\evolutionary-art\python\src\live_refiner.py): active live refiner module
-- [python/src/live_optimizer.py](C:\Users\ahada\Documents\abdulahad\evolutionary-art\python\src\live_optimizer.py): joint optimizer and rollback logic
-- [python/src/live_schedule.py](C:\Users\ahada\Documents\abdulahad\evolutionary-art\python\src\live_schedule.py): growth helpers, grid seeding, residual targeting
+```powershell
+Set-Location python
+$env:PYTHONPATH = (Get-Location).Path
+uv run pytest .\tests\test_live_optimizer.py .\tests\test_live_renderer.py .\tests\test_mse.py .\tests\test_preprocessing.py .\tests\test_refiner_live.py -q
+```
+
+## Key Files
+- [python/src/live_refiner.py](C:\Users\ahada\Documents\abdulahad\evolutionary-art\python\src\live_refiner.py): multi-stage sequential reconstruction driver
+- [python/src/live_optimizer.py](C:\Users\ahada\Documents\abdulahad\evolutionary-art\python\src\live_optimizer.py): candidate scoring, analytic color solve, and hill climbing
+- [python/src/core_renderer.py](C:\Users\ahada\Documents\abdulahad\evolutionary-art\python\src\core_renderer.py): soft rasterizer and primitive compositing
 - [python/run.py](C:\Users\ahada\Documents\abdulahad\evolutionary-art\python\run.py): CLI entry point
-- [docs/academic_paper.md](C:\Users\ahada\Documents\abdulahad\evolutionary-art\docs\academic_paper.md): implementation-focused paper draft
+- [docs/academic_paper.md](C:\Users\ahada\Documents\abdulahad\evolutionary-art\docs\academic_paper.md): current implementation report
+- [docs/approach_retrospective.md](C:\Users\ahada\Documents\abdulahad\evolutionary-art\docs\approach_retrospective.md): best approach and failed-approach analysis

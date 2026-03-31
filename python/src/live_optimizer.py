@@ -299,18 +299,16 @@ class SequentialHillClimber:
         stage: SequentialStageConfig,
         structure_map: np.ndarray,
         linearity_map: np.ndarray,
-        gradient_variance_map: np.ndarray,
         x: int,
         y: int,
         rng: np.random.Generator,
     ) -> int:
         structure = float(structure_map[y, x])
         linearity = float(linearity_map[y, x])
-        variance = float(gradient_variance_map[y, x])
         allowed = tuple(int(shape) for shape in stage.allowed_shapes)
 
         # Smooth/curved regions should stay organic and round.
-        if structure < 0.18 or variance < 0.012:
+        if structure < 0.18:
             if SHAPE_ELLIPSE in allowed:
                 return SHAPE_ELLIPSE
             return allowed[0]
@@ -319,21 +317,18 @@ class SequentialHillClimber:
         if (
             SHAPE_THIN_STROKE in allowed
             and structure >= 0.62
-            and variance >= 0.030
             and linearity >= 0.68
         ):
             return SHAPE_THIN_STROKE
         if (
             SHAPE_TRIANGLE in allowed
             and structure >= 0.42
-            and variance >= 0.020
             and linearity >= 0.45
         ):
             return SHAPE_TRIANGLE
         if (
             SHAPE_QUAD in allowed
             and structure >= 0.35
-            and variance >= 0.018
             and rng.random() < 0.15
         ):
             return SHAPE_QUAD
@@ -372,7 +367,6 @@ class SequentialHillClimber:
         structure_map: np.ndarray,
         angle_map: np.ndarray,
         linearity_map: np.ndarray,
-        gradient_variance_map: np.ndarray,
         rng: np.random.Generator,
     ) -> ShapeCandidate:
         px = int(np.clip(round(center_x), 0, self.width - 1))
@@ -384,7 +378,6 @@ class SequentialHillClimber:
             stage=stage,
             structure_map=structure_map,
             linearity_map=linearity_map,
-            gradient_variance_map=gradient_variance_map,
             x=px,
             y=py,
             rng=rng,
@@ -504,7 +497,6 @@ class SequentialHillClimber:
         structure_map: np.ndarray,
         angle_map: np.ndarray,
         linearity_map: np.ndarray,
-        gradient_variance_map: np.ndarray,
         rng: np.random.Generator,
     ) -> ShapeCandidate | None:
         centers = self.sample_error_centers(
@@ -526,7 +518,6 @@ class SequentialHillClimber:
                 structure_map=structure_map,
                 angle_map=angle_map,
                 linearity_map=linearity_map,
-                gradient_variance_map=gradient_variance_map,
                 rng=rng,
             )
             scored = self.evaluate_candidate(candidate, softness=stage.softness)

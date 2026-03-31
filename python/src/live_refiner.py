@@ -213,7 +213,7 @@ def _scale_polygons_to_resolution(
 
 def _compute_structure_maps(
     target: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     gray = np.mean(target, axis=2, dtype=np.float32)
     gy, gx = np.gradient(gray)
     magnitude = np.hypot(gx, gy).astype(np.float32, copy=False)
@@ -229,16 +229,7 @@ def _compute_structure_maps(
         np.float32, copy=False
     )
     linearity = np.clip(linearity, 0.0, 1.0).astype(np.float32, copy=False)
-    mean_mag = uniform_filter(structure, size=5, mode="reflect")
-    mean_mag_sq = uniform_filter(structure * structure, size=5, mode="reflect")
-    grad_variance = np.clip(mean_mag_sq - mean_mag * mean_mag, 0.0, None).astype(
-        np.float32, copy=False
-    )
-    var_scale = max(float(np.percentile(grad_variance, 99.0)), 1e-6)
-    grad_variance = np.clip(grad_variance / var_scale, 0.0, 1.0).astype(
-        np.float32, copy=False
-    )
-    return structure, angle, linearity, grad_variance
+    return structure, angle, linearity
 
 
 def _guide_map(
@@ -397,12 +388,7 @@ def execute_phase7_schedule(
             polygons=stage_polygons,
             background_color=background_color,
         )
-        (
-            structure_map,
-            angle_map,
-            linearity_map,
-            gradient_variance_map,
-        ) = _compute_structure_maps(stage_target)
+        structure_map, angle_map, linearity_map = _compute_structure_maps(stage_target)
 
         stage_markers.append((stage.name, len(loss_history)))
         resolution_markers.append(len(loss_history))
@@ -452,7 +438,6 @@ def execute_phase7_schedule(
                 structure_map=structure_map,
                 angle_map=angle_map,
                 linearity_map=linearity_map,
-                gradient_variance_map=gradient_variance_map,
                 rng=rng,
             )
             if candidate is None:

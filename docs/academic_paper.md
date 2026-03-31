@@ -1,198 +1,126 @@
-# Attention-Guided Evolutionary Reconstruction with a Live Refiner Pipeline
+# Sequential Greedy Evolutionary Reconstruction
 
 ## Abstract
-This document describes the current implementation state of the repository rather than an aspirational design. The system reconstructs target images with ordered alpha-blended primitives and a live refiner pipeline implemented in `python/src/live_refiner.py`. The current codebase includes grid-seeded initialization, a four-round multi-resolution schedule, independent rollback for appearance and geometry updates, transmittance-weighted color gradients, diverse error-region sampling, structure-guided primitive aspect ratios, and LAB-based round palette refinement. The implementation is functional and test-backed, but the finite-difference geometry stage remains computationally expensive. On the current machine, a capped 5-minute `200x200` run on `grape.jpg` completed only the first round and produced `rgb_mse=0.07396`, `ssim=0.15606`, and `gradient_mse=0.01458`, indicating that the present system is operational but not yet high-fidelity under that wall-clock budget.
+This document describes the current best verified implementation in the repository as of March 31, 2026. The system reconstructs a target image with explicit alpha-blended geometric primitives using a sequential greedy search rather than a joint gradient optimizer. The active pipeline evaluates many candidate shapes in high-error regions, solves each candidate color analytically, hill-climbs only the best candidate geometry, and commits that single shape to the canvas. A 5-minute headless reconstruction of `python/targets/grape.jpg` at `200x200` currently yields `rgb_mse=0.020303`, `ssim=0.45878`, and `gradient_corr=0.59014`, which is the strongest verified result presently kept in the workspace.
 
-## 1. Scope
-The goal of the project is interpretable image reconstruction with explicit primitive geometry instead of latent generative synthesis. Every accepted update corresponds to a visible primitive change, so optimization traces can be inspected in terms of position, size, color, and shape.
+## 1. Project Goal
+The project aims to approximate arbitrary images with interpretable geometric primitives. Instead of generating a latent image and decoding it, the system constructs the result from a visible sequence of primitive additions. Each accepted step corresponds to a concrete geometric decision:
+- where a shape is placed
+- how large it is
+- how it is rotated
+- what color it contributes
+- what primitive family it belongs to
 
-The active live module is:
+This makes the optimization trace inspectable and suitable for studying where reconstruction quality improves or degrades.
+
+## 2. Active Implementation
+The current active modules are:
 - `python/src/live_refiner.py`
-
-Supporting modules used by the current live path are:
 - `python/src/live_optimizer.py`
-- `python/src/live_schedule.py`
 - `python/src/core_renderer.py`
+- `python/run.py`
 
-## 2. Current Pipeline
+The current codebase no longer uses the earlier finite-difference live optimizer as its main path. The restored best path is a sequential painter.
 
-### 2.1 Primitive Representation
-The reconstruction canvas is composed from an ordered list of transparent primitives. The current renderer supports:
+## 3. Method
+
+### 3.1 Primitive Dictionary
+The renderer currently supports:
 - ellipses
+- quads
 - triangles
 - thin strokes
 
-Each primitive carries:
-- center
-- size
-- rotation
-- RGB color
-- alpha
-- shape-specific parameters
+Each primitive is alpha-blended onto the current canvas in order.
 
-The ordering matters because compositing is done front-to-back in sequence.
+### 3.2 Sequential Addition
+The central design choice is sequential greedy growth:
+1. compute the current error map between target and canvas
+2. sample candidate centers from the strongest error regions
+3. generate candidate shapes around those centers
+4. solve candidate colors analytically from covered target pixels
+5. render and score every candidate independently
+6. hill-climb the best candidate geometry
+7. commit only that single winning shape
 
-### 2.2 Appearance and Geometry Optimization
-The current `LiveJointOptimizer.step()` implementation is split into two independent passes:
+This keeps the optimization problem local and bounded instead of jointly updating hundreds of existing parameters.
 
-1. Appearance pass
-   - updates color every step
-   - evaluates loss immediately after the appearance update
-   - rolls back only appearance parameters if that update is worse
-2. Geometry pass
-   - runs on interval
-   - computes finite-difference gradients for centers and sizes
-   - evaluates loss after geometry alone
-   - rolls back only geometry parameters if that update is worse
+### 3.3 Analytic Color
+Color is not learned with a gradient step in the active best variant. For each candidate shape, the renderer computes its coverage mask and solves the color directly from the target and current canvas under that mask. This removes RGB from the mutation search and makes geometry search much cheaper.
 
-This replaced the older coupled rollback behavior where a good color update could be lost because a geometry update in the same step overshot.
+### 3.4 Geometry Search
+Geometry is refined with a mutation-based hill climber:
+- initial candidate pool sampled from top residual regions
+- local mutations over center, size, and rotation
+- accept only mutations that reduce RGB MSE
 
-### 2.3 Color Gradient
-The current color gradient uses visibility-aware weights:
+This replaced the earlier slower finite-difference update path for the best current workflow.
 
-$$
-w_i = \mathrm{trans\_after}_i \cdot \mathrm{effective\_alpha}_i
-$$
+## 4. Schedule
+The restored best schedule is a three-stage plan:
 
-and
-
-$$
-\nabla_{c_i}\mathcal{L} \propto \sum_{x,y} w_i(x,y)\,r(x,y)
-$$
-
-where `trans_after` is the remaining transmittance from primitive `i` to the output and `effective_alpha` is coverage multiplied by scalar alpha. This prevents deeply buried primitives from receiving a color update as if they were fully visible.
-
-### 2.4 Grid-Seeded Initialization
-The first coarse round no longer starts from random polygons. Instead:
-- the `50x50` target is divided into a regular grid
-- each seed polygon is placed at a grid-cell center
-- the polygon color is the mean RGB color of that target cell
-- alpha is initialized to `0.85`
-- rotation is initialized to `0`
-- the initial primitive type is ellipse
-
-For the standard coarse run this uses `24` polygons over an effective `5x5` grid with one cell dropped.
-
-### 2.5 Diverse Region Sampling
-Polygon insertion no longer uses a single repeatedly chosen maximum-error region. The live schedule now:
-- computes a region-summed error map
-- extracts a top-`K` candidate pool
-- samples distinct regions without replacement
-
-The same idea is applied in `live_schedule.py` so batch growth is less likely to collapse into a single hotspot.
-
-### 2.6 Structure-Guided Shape Initialization
-New primitives use local structure measurements:
-- low-structure regions receive near-circular aspect ratios
-- stronger edges produce elongated aspect ratios
-- major axes are oriented perpendicular to the gradient direction
-- thin strokes derive length and width from local structure strength
-
-This logic lives in `live_schedule.py` and is used by the current live refiner insertion path.
-
-### 2.7 Palette Refinement
-Between rounds, each polygon is recolored by:
-1. sampling target pixels under that polygon’s coverage
-2. computing the mean LAB color
-3. blending `70%` sampled target color with `30%` current polygon color
-
-This pass is currently implemented between resolution transitions in the live refiner helper.
-
-## 3. Current Round Schedule
-The current helper-backed schedule in `live_refiner.py` is a fixed four-round plan:
-
-1. Round A
+1. Foundation
    - resolution: `50x50`
-   - initial polygons: `24`
-   - additions: `10` batches of `8`
-   - learning rates: `position=0.8`, `size=0.3`, `color=0.05`
-2. Round B
+   - shapes: `50`
+   - types: ellipses and quads
+   - candidate search: `42`
+   - mutation steps: `84`
+2. Structure
    - resolution: `100x100`
-   - additions: `8` batches of `6`
-   - learning rates: `position=0.6`, `size=0.2`, `color=0.04`
-3. Round C
+   - shapes: `100`
+   - types: ellipses, quads, triangles
+   - candidate search: `56`
+   - mutation steps: `112`
+3. Detail
    - resolution: `200x200`
-   - additions: `10` batches of `5`
-   - learning rates: `position=0.4`, `size=0.15`, `color=0.03`
-4. Round D
-   - resolution: `200x200`
-   - additions: `10` batches of `3`
-   - learning rates: `position=0.2`, `size=0.08`, `color=0.02`
+   - remaining shapes
+   - types: ellipses, triangles, thin strokes
+   - candidate search: `72`
+   - mutation steps: `156`
 
-Other current schedule settings:
-- `position_update_interval = 1`
-- `size_update_interval = 3`
-- `max_fd_polygons = None` for `50x50` and `100x100`
-- `max_fd_polygons = 40` for `200x200`
-- if remaining runtime drops below `30` seconds, remaining additions are skipped and the system switches to final-only optimization
+The detail stage uses a high-frequency-biased residual map, while the earlier stages use broader residual targeting.
 
-## 4. Runtime Behavior
-The system still exposes:
-- a live display path
-- a headless path
-- pause, quit, screenshot, residual-mode, segmentation, focus-view, and softness controls
+## 5. Verification
 
-The module file has been renamed to `live_refiner.py`, but several internal symbol names still retain the older `Phase7...` naming for compatibility with the existing CLI and tests.
+### 5.1 Code Verification
+Verified locally with:
+- `uv run pytest .\tests\test_live_optimizer.py .\tests\test_live_renderer.py .\tests\test_mse.py .\tests\test_preprocessing.py .\tests\test_refiner_live.py -q`
 
-## 5. Verification Performed
-Recent verification performed against the current implementation:
+At the time of this update, that suite passed with `13` tests.
 
-### 5.1 Code-Level Checks
-- `uv run python -m compileall` on active Python source and support files
-- focused pytest runs for:
-  - `test_live_optimizer.py`
-  - `test_refiner_live.py`
-- a manifest-verified repomix snapshot builder at `python/scripts/build_python_repomix.py`
-  - outputs `python/python_repomix.xml`
-  - includes the Python root entrypoints and `python/src/`
-  - excludes cache folders, `.venv`, `targets`, `outputs`, `scripts`, `tests`, `uv.lock`, and `.python-version`
-
-### 5.2 Sanity Checks
-Completed checks:
-- geometry positions visibly changed during a 50-step single-ellipse test
-- coarse grid seeding achieved `rgb_mse=0.076436` on `grape.jpg` at `50x50`
-- `trans_after` behaved as expected on a stacked-ellipse visibility check
-
-### 5.3 Five-Minute Reconstruction Check
-The current verified 5-minute run used:
+### 5.2 Five-Minute Reconstruction
+The currently kept best run in the workspace is:
+- run id: `grape_20260331_093438`
 - target: `python/targets/grape.jpg`
 - resolution: `200x200`
-- runtime cap: `300` seconds
+- runtime budget: `5 minutes`
+- accepted shapes: `295`
 
-Measured results:
-- `elapsed_seconds = 300.59`
-- `iterations = 201`
-- `polygon_count = 32`
-- `rgb_mse = 0.07396`
-- `lab_mse = 321.31`
-- `psnr = 11.31 dB`
-- `ssim = 0.15606`
-- `gradient_mse = 0.01458`
-- `gradient_mae = 0.07681`
-- `gradient_corr = -0.02610`
-- stage markers: only `A`
-- shape counts: `32` ellipses, `0` triangles, `0` strokes
+Measured final metrics:
+- `rgb_mse = 0.020303`
+- `rmse = 0.14249`
+- `psnr = 16.924 dB`
+- `ssim = 0.45878`
+- `lab_mse = 110.403`
+- `gradient_mse = 0.00761`
+- `gradient_mae = 0.05647`
+- `gradient_corr = 0.59014`
 
-Saved outputs:
-- `python/outputs/refiner_eval/grape_refiner_5min.png`
-- `python/outputs/refiner_eval/grape_refiner_5min_metrics.json`
+Saved artifacts:
+- `python/outputs/stage_checkpoints/grape_20260331_093438/stage_detail.png`
+- `python/outputs/stage_checkpoints/grape_20260331_093438/run_metrics.json`
+
+### 5.3 Historical Note
+During development on March 31, 2026, the same restored three-stage sequential variant previously produced a slightly better one-off `rgb_mse` of about `0.01948`. That historical artifact is no longer present in the cleaned workspace, but it is important because it shows the current code family has already reached a slightly stronger point than the presently kept rerun.
 
 ## 6. Discussion
-The codebase is more correct than the earlier version in several important ways:
-- color and geometry rollback are decoupled
-- color gradients respect visibility
-- growth targets are more diverse
-- shape initialization is more content-aware
-- file/module naming has been updated away from `phase7` in the workspace
+The restored sequential greedy method clearly outperformed the later branches that pushed too hard toward global low-alpha watercolor constraints or edge-heavy routing. The main lesson from the experiments is that the system benefits from:
+- strong mid-stage shape capacity
+- analytic color instead of color learning
+- aggressive candidate search in the detail stage
+- simple residual routing rather than over-structured routing
 
-However, correctness has not yet translated into strong 5-minute reconstruction quality on the grape target. The main bottleneck is still the finite-difference geometry cost, which limits how many optimization steps and rounds complete within a fixed wall-clock budget.
+The system still has room to improve. The current best image is recognizable and substantially better than the earlier gradient-based live refiner, but it is still visibly approximate in the grape interiors and leaf boundaries.
 
-## 7. Limitations
-Current limitations of the repository state are:
-- the refiner does not yet finish all planned rounds inside 5 minutes on the current machine
-- the measured 5-minute grape reconstruction is not yet visually strong enough to claim easy recognition
-- many public-facing function and class names still use legacy `Phase7` naming even though the file/module names no longer do
-- the documentation now matches the code, but the code itself still needs further optimization work for high-quality time-bounded results
-
-## 8. Conclusion
-The repository currently contains a working live refiner implementation with better optimizer correctness, cleaner growth logic, and up-to-date file naming. The documentation in this file reflects the current verified state of the codebase rather than an ideal future result. The next engineering priority is runtime reduction for geometry updates so the multi-round schedule can actually complete within the intended 5-minute budget.
+## 7. Conclusion
+The repository’s current best implementation is a three-stage sequential greedy geometric reconstructor. It is now the code path reflected in the repository documentation, the kept output artifacts, and the retrospective notes. The next practical work should focus on squeezing a bit more quality from this restored version rather than switching to a new optimization family again.
