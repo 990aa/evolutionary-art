@@ -72,10 +72,16 @@ def compute_metrics(
 
 
 def main() -> int:
-    project_root = Path(__file__).resolve().parents[1]
-    targets_dir = project_root / "python" / "targets"
-    docs_figures = project_root / "docs" / "figures"
-    docs_figures.mkdir(parents=True, exist_ok=True)
+    module_root = Path(__file__).resolve().parent
+    targets_dir = module_root / "targets"
+    reports_dir = module_root / "outputs" / "final_eval"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+
+    if not targets_dir.exists():
+        raise FileNotFoundError(
+            f"Target directory not found: {targets_dir}. "
+            "Create cpu_optimized/targets and add input images first."
+        )
 
     image_names = [
         "internet_portrait.jpg",
@@ -125,9 +131,9 @@ def main() -> int:
         abs_err = absolute_error_map(target, recon)
 
         stem = image_name.rsplit(".", 1)[0]
-        target_file = docs_figures / f"{stem}_refiner_target_500.png"
-        recon_file = docs_figures / f"{stem}_refiner_reconstruction_500.png"
-        err_file = docs_figures / f"{stem}_refiner_abs_error_500.png"
+        target_file = reports_dir / f"{stem}_refiner_target_500.png"
+        recon_file = reports_dir / f"{stem}_refiner_reconstruction_500.png"
+        err_file = reports_dir / f"{stem}_refiner_abs_error_500.png"
 
         save_rgb_image(target_file, target)
         save_rgb_image(recon_file, recon)
@@ -147,15 +153,9 @@ def main() -> int:
                 ssim=ssim,
                 accuracy_percent=accuracy,
                 pixel_match_5pct=pixel_match,
-                target_file=str(target_file.relative_to(project_root)).replace(
-                    "\\", "/"
-                ),
-                reconstruction_file=str(recon_file.relative_to(project_root)).replace(
-                    "\\", "/"
-                ),
-                abs_error_file=str(err_file.relative_to(project_root)).replace(
-                    "\\", "/"
-                ),
+                target_file=str(target_file),
+                reconstruction_file=str(recon_file),
+                abs_error_file=str(err_file),
             )
         )
 
@@ -170,7 +170,7 @@ def main() -> int:
         "results": [asdict(item) for item in metrics],
     }
 
-    out_json = docs_figures / "refiner_final_reconstruction_metrics.json"
+    out_json = reports_dir / "refiner_final_reconstruction_metrics.json"
     out_json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     print(json.dumps(payload, indent=2))
     print(f"Saved metrics: {out_json}")
